@@ -1,5 +1,6 @@
 const std = @import("std");
 const Box = @import("Box.zig").Box;
+const Default = @import("Default.zig").Default;
 
 /// Thread-safe mutual exclusion wrapper around an owned value.
 /// Similar to Rust's `Mutex<T>`.
@@ -26,6 +27,11 @@ pub fn Mutex(comptime T: type) type {
                 .box = try Box(T, 0, 0, 0).init(allocator, value),
                 .inner_mutex = .unlocked,
             };
+        }
+
+        /// Create a Mutex wrapping the default value for `T`.
+        pub fn initDefault(allocator: std.mem.Allocator) !Self {
+            return init(allocator, Default(T));
         }
 
         fn spinLock(mutex: *std.atomic.Mutex) void {
@@ -244,4 +250,14 @@ pub fn RwLockWriteGuard(comptime T: type) type {
             return self.rwlock.getMut();
         }
     };
+}
+
+// ─── Tests ───
+
+test "Mutex initDefault" {
+    var mtx = try Mutex(u32).initDefault(std.testing.allocator);
+    defer mtx.deinit();
+    mtx.lock();
+    try std.testing.expectEqual(mtx.get().*, 0);
+    mtx.unlock();
 }

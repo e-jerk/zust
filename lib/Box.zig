@@ -1,4 +1,5 @@
 const std = @import("std");
+const Default = @import("Default.zig").Default;
 
 /// Typestate-encoded owned heap value.
 ///
@@ -36,6 +37,11 @@ pub fn Box(comptime T: type, comptime state_tag: u32, comptime imm_count: u32, c
             const ptr = try allocator.create(T);
             ptr.* = value;
             return .{ .ptr = ptr, .allocator = allocator };
+        }
+
+        /// Allocate and wrap the default value for `T`.
+        pub fn initDefault(allocator: std.mem.Allocator) !Box(T, 0, 0, 0) {
+            return init(allocator, Default(T));
         }
 
         // ─── Immutable borrow ───
@@ -159,4 +165,11 @@ test "Box leak" {
     // In real usage the memory would be leaked; here we free manually
     // so the test allocator doesn't report a leak.
     std.testing.allocator.destroy(ptr);
+}
+
+test "Box initDefault" {
+    const box = try Box(u32, 0, 0, 0).initDefault(std.testing.allocator);
+    try std.testing.expectEqual(box.ptr.*, 0);
+    const dead = box.deinit();
+    _ = dead;
 }

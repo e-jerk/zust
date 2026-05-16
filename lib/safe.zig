@@ -1,6 +1,7 @@
 //! zust: zero-cost ownership via comptime typestate.
 
 const std = @import("std");
+pub const Default = @import("Default.zig").Default;
 pub const Box = @import("Box.zig").Box;
 pub const LinkedList = @import("LinkedList.zig").LinkedList;
 pub const ArrayList = @import("ArrayList.zig").ArrayList;
@@ -126,6 +127,8 @@ pub const BloomFilter = @import("BloomFilter.zig").BloomFilter;
 comptime { _ = BloomFilter; }
 pub const AlignedPtr = @import("Aligned.zig").AlignedPtr;
 pub const CacheAligned = @import("Aligned.zig").CacheAligned;
+pub const GuardedSlice = @import("OffsetGuard.zig").GuardedSlice;
+pub const OffsetPtr = @import("OffsetGuard.zig").OffsetPtr;
 
 test "Box init and deinit" {
     const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
@@ -485,6 +488,19 @@ test "ArrayList ensureCapacity" {
     try list.ensureCapacity(10);
     try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 1));
     try std.testing.expectEqual(list.len(), 1);
+}
+
+test "ArrayList findLast" {
+    var list = ArrayList(u8).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(try Box(u8, 0, 0, 0).init(std.testing.allocator, 'a'));
+    try list.append(try Box(u8, 0, 0, 0).init(std.testing.allocator, 'b'));
+    try list.append(try Box(u8, 0, 0, 0).init(std.testing.allocator, 'a'));
+
+    try std.testing.expectEqual(list.findLast('a'), 2);
+    try std.testing.expectEqual(list.findLast('b'), 1);
+    try std.testing.expectEqual(list.findLast('z'), null);
 }
 
 // === Arc Tests ===

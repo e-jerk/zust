@@ -700,6 +700,229 @@ fn benchmarkSimdArrayListCopy(allocator: std.mem.Allocator) !void {
     printSimdComparison("ArrayList copy 10K", scalar_ns, simd_ns);
 }
 
+// ─── 14. SIMD findByteReverse ───
+
+fn benchSimdFindByteReverseSimd(_: std.mem.Allocator) !void {
+    var haystack: [10240]u8 = undefined;
+    for (0..haystack.len) |i| haystack[i] = @intCast(i % 256);
+    haystack[haystack.len - 1] = 'y';
+
+    var acc: usize = 0;
+    for (0..1_000_000) |i| {
+        const byte = @as(*const volatile u8, &haystack[i % haystack.len]).*;
+        std.mem.doNotOptimizeAway(byte);
+        if (safe.SimdUtils.findByteReverse(&haystack, 'y')) |pos| acc +%= pos;
+    }
+    std.mem.doNotOptimizeAway(acc);
+}
+
+fn benchSimdFindByteReverseScalar(_: std.mem.Allocator) !void {
+    var haystack: [10240]u8 = undefined;
+    for (0..haystack.len) |i| haystack[i] = @intCast(i % 256);
+    haystack[haystack.len - 1] = 'y';
+
+    var acc: usize = 0;
+    for (0..1_000_000) |i| {
+        const byte = @as(*const volatile u8, &haystack[i % haystack.len]).*;
+        std.mem.doNotOptimizeAway(byte);
+        var pos: ?usize = null;
+        var j: usize = haystack.len;
+        while (j > 0) {
+            j -= 1;
+            if (haystack[j] == 'y') {
+                pos = j;
+                break;
+            }
+        }
+        if (pos) |p| acc +%= p;
+    }
+    std.mem.doNotOptimizeAway(acc);
+}
+
+fn benchmarkSimdFindByteReverse(_: std.mem.Allocator) !void {
+    var haystack: [10240]u8 = undefined;
+    for (0..haystack.len) |i| haystack[i] = @intCast(i % 256);
+    haystack[haystack.len - 1] = 'y';
+
+    var scalar_acc: usize = 0;
+    const scalar_start = nanoTimestamp();
+    for (0..10_000_000) |_| {
+        std.mem.doNotOptimizeAway(haystack);
+        var pos: ?usize = null;
+        var j: usize = haystack.len;
+        while (j > 0) {
+            j -= 1;
+            if (haystack[j] == 'y') {
+                pos = j;
+                break;
+            }
+        }
+        if (pos) |p| scalar_acc +%= p;
+    }
+    const scalar_end = nanoTimestamp();
+    std.mem.doNotOptimizeAway(scalar_acc);
+
+    var simd_acc: usize = 0;
+    const simd_start = nanoTimestamp();
+    for (0..10_000_000) |_| {
+        std.mem.doNotOptimizeAway(haystack);
+        if (safe.SimdUtils.findByteReverse(&haystack, 'y')) |pos| simd_acc +%= pos;
+    }
+    const simd_end = nanoTimestamp();
+    std.mem.doNotOptimizeAway(simd_acc);
+
+    const scalar_ns = @divFloor(scalar_end - scalar_start, 10_000_000);
+    const simd_ns = @divFloor(simd_end - simd_start, 10_000_000);
+    printSimdComparison("findByteReverse 10KB", scalar_ns, simd_ns);
+}
+
+// ─── 15. SIMD contains (substring) ───
+
+fn benchSimdContainsSimd(_: std.mem.Allocator) !void {
+    var haystack: [10240]u8 = undefined;
+    for (0..haystack.len) |i| haystack[i] = @intCast(i % 256);
+    @memcpy(haystack[5000..5006], "needle");
+
+    var acc: u64 = 0;
+    for (0..1_000_000) |i| {
+        const byte = @as(*const volatile u8, &haystack[i % haystack.len]).*;
+        std.mem.doNotOptimizeAway(byte);
+        if (safe.SimdUtils.contains(&haystack, "needle")) acc +%= 1;
+    }
+    std.mem.doNotOptimizeAway(acc);
+}
+
+fn benchSimdContainsScalar(_: std.mem.Allocator) !void {
+    var haystack: [10240]u8 = undefined;
+    for (0..haystack.len) |i| haystack[i] = @intCast(i % 256);
+    @memcpy(haystack[5000..5006], "needle");
+
+    var acc: u64 = 0;
+    for (0..1_000_000) |i| {
+        const byte = @as(*const volatile u8, &haystack[i % haystack.len]).*;
+        std.mem.doNotOptimizeAway(byte);
+        var found = false;
+        const needle = "needle";
+        outer: for (0..haystack.len - needle.len + 1) |j| {
+            for (0..needle.len) |k| {
+                if (haystack[j + k] != needle[k]) continue :outer;
+            }
+            found = true;
+            break;
+        }
+        if (found) acc +%= 1;
+    }
+    std.mem.doNotOptimizeAway(acc);
+}
+
+fn benchmarkSimdContains(_: std.mem.Allocator) !void {
+    var haystack: [10240]u8 = undefined;
+    for (0..haystack.len) |i| haystack[i] = @intCast(i % 256);
+    @memcpy(haystack[5000..5006], "needle");
+
+    var scalar_acc: u64 = 0;
+    const scalar_start = nanoTimestamp();
+    for (0..1_000_000) |_| {
+        std.mem.doNotOptimizeAway(haystack);
+        var found = false;
+        const needle = "needle";
+        outer: for (0..haystack.len - needle.len + 1) |j| {
+            for (0..needle.len) |k| {
+                if (haystack[j + k] != needle[k]) continue :outer;
+            }
+            found = true;
+            break;
+        }
+        if (found) scalar_acc +%= 1;
+    }
+    const scalar_end = nanoTimestamp();
+    std.mem.doNotOptimizeAway(scalar_acc);
+
+    var simd_acc: u64 = 0;
+    const simd_start = nanoTimestamp();
+    for (0..1_000_000) |_| {
+        std.mem.doNotOptimizeAway(haystack);
+        if (safe.SimdUtils.contains(&haystack, "needle")) simd_acc +%= 1;
+    }
+    const simd_end = nanoTimestamp();
+    std.mem.doNotOptimizeAway(simd_acc);
+
+    const scalar_ns = @divFloor(scalar_end - scalar_start, 1_000_000);
+    const simd_ns = @divFloor(simd_end - simd_start, 1_000_000);
+    printSimdComparison("contains substring 10KB", scalar_ns, simd_ns);
+}
+
+// ─── 16. SIMD eqlIgnoreCase ───
+
+fn benchSimdEqlIgnoreCaseSimd(_: std.mem.Allocator) !void {
+    const a = "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+    const b = "abcdefghijklmnopqrstuvwxyz123456";
+
+    var acc: u64 = 0;
+    for (0..1_000_000) |i| {
+        const byte = @as(*const volatile u8, &a[i % a.len]).*;
+        std.mem.doNotOptimizeAway(byte);
+        if (safe.SimdUtils.eqlIgnoreCase(a, b)) acc +%= 1;
+    }
+    std.mem.doNotOptimizeAway(acc);
+}
+
+fn benchSimdEqlIgnoreCaseScalar(_: std.mem.Allocator) !void {
+    const a = "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+    const b = "abcdefghijklmnopqrstuvwxyz123456";
+
+    var acc: u64 = 0;
+    for (0..1_000_000) |i| {
+        const byte = @as(*const volatile u8, &a[i % a.len]).*;
+        std.mem.doNotOptimizeAway(byte);
+        var match = true;
+        for (0..a.len) |j| {
+            if (std.ascii.toLower(a[j]) != std.ascii.toLower(b[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) acc +%= 1;
+    }
+    std.mem.doNotOptimizeAway(acc);
+}
+
+fn benchmarkSimdEqlIgnoreCase(_: std.mem.Allocator) !void {
+    const a = "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+    const b = "abcdefghijklmnopqrstuvwxyz123456";
+
+    var scalar_acc: u64 = 0;
+    const scalar_start = nanoTimestamp();
+    for (0..10_000_000) |_| {
+        std.mem.doNotOptimizeAway(a);
+        std.mem.doNotOptimizeAway(b);
+        var match = true;
+        for (0..a.len) |j| {
+            if (std.ascii.toLower(a[j]) != std.ascii.toLower(b[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) scalar_acc +%= 1;
+    }
+    const scalar_end = nanoTimestamp();
+    std.mem.doNotOptimizeAway(scalar_acc);
+
+    var simd_acc: u64 = 0;
+    const simd_start = nanoTimestamp();
+    for (0..10_000_000) |_| {
+        std.mem.doNotOptimizeAway(a);
+        std.mem.doNotOptimizeAway(b);
+        if (safe.SimdUtils.eqlIgnoreCase(a, b)) simd_acc +%= 1;
+    }
+    const simd_end = nanoTimestamp();
+    std.mem.doNotOptimizeAway(simd_acc);
+
+    const scalar_ns = @divFloor(scalar_end - scalar_start, 10_000_000);
+    const simd_ns = @divFloor(simd_end - simd_start, 10_000_000);
+    printSimdComparison("eqlIgnoreCase 32B", scalar_ns, simd_ns);
+}
+
 // ─── Main ───
 
 pub fn main() !void {
@@ -741,6 +964,12 @@ pub fn main() !void {
         .{ .name = "12. SIMD SmallString.contains (scalar)", .iterations = 1_000_000, .func = benchSimdSmallStringScalar },
         .{ .name = "13. SIMD ArrayList copy 10K", .iterations = 10_000, .func = benchSimdArrayListCopySimd },
         .{ .name = "13. SIMD ArrayList copy 10K (scalar)", .iterations = 10_000, .func = benchSimdArrayListCopyScalar },
+        .{ .name = "14. SIMD findByteReverse 10KB", .iterations = 1_000_000, .func = benchSimdFindByteReverseSimd },
+        .{ .name = "14. SIMD findByteReverse 10KB (scalar)", .iterations = 1_000_000, .func = benchSimdFindByteReverseScalar },
+        .{ .name = "15. SIMD contains substring 10KB", .iterations = 1_000_000, .func = benchSimdContainsSimd },
+        .{ .name = "15. SIMD contains substring 10KB (scalar)", .iterations = 1_000_000, .func = benchSimdContainsScalar },
+        .{ .name = "16. SIMD eqlIgnoreCase 32B", .iterations = 1_000_000, .func = benchSimdEqlIgnoreCaseSimd },
+        .{ .name = "16. SIMD eqlIgnoreCase 32B (scalar)", .iterations = 1_000_000, .func = benchSimdEqlIgnoreCaseScalar },
     };
 
     var total_ns: i128 = 0;
@@ -756,6 +985,9 @@ pub fn main() !void {
     try benchmarkSimdStartsWith(allocator);
     try benchmarkSimdSmallString(allocator);
     try benchmarkSimdArrayListCopy(allocator);
+    try benchmarkSimdFindByteReverse(allocator);
+    try benchmarkSimdContains(allocator);
+    try benchmarkSimdEqlIgnoreCase(allocator);
 
     std.debug.print("{s}\n", .{"-" ** 70});
     const total_ms = @divFloor(total_ns, 1_000_000);

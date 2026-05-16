@@ -20,6 +20,11 @@ pub fn HashMap(comptime T: type) type {
             };
         }
 
+        /// Create an empty map (same as `init`).
+        pub fn initDefault(allocator: std.mem.Allocator) Self {
+            return init(allocator);
+        }
+
         pub fn deinit(self: *Self) void {
             if (self.outstanding_imm > 0) {
                 @panic("cannot deinit HashMap while active immutable borrows exist");
@@ -390,4 +395,10 @@ test "HashMap rev iterator" {
     }
     try std.testing.expectEqual(@as(usize, 2), count);
     try std.testing.expectEqual(@as(usize, 0), map.len());
+}
+
+test "HashMap initDefault" {
+    var map = HashMap(u32).initDefault(std.testing.allocator);
+    defer map.deinit();
+    try std.testing.expect(map.isEmpty());
 }

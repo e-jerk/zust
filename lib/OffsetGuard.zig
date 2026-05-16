@@ -46,6 +46,17 @@ pub fn OffsetPtr(comptime T: type) type {
             const idx = (@intFromPtr(self.ptr) - @intFromPtr(self.base)) / @sizeOf(T);
             return idx >= 0 and idx < self.len;
         }
+
+        /// Create from a single stack variable (treats it as a 1-element slice).
+        pub fn init(_: std.mem.Allocator, ptr: *T) Self {
+            return .{
+                .ptr = ptr,
+                .base = @ptrCast(ptr),
+                .len = 1,
+            };
+        }
+
+        pub fn deinit(_: Self) void {}
     };
 }
 

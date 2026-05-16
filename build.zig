@@ -64,6 +64,21 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(analyzer_exe);
 
+    // Wasm build step for zust-analyzer
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
+    const wasm_mod = b.createModule(.{
+        .root_source_file = b.path("analyzer/src/main.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    wasm_mod.addImport("safe", safe_module);
+    const wasm_exe = b.addExecutable(.{
+        .name = "zust-analyzer",
+        .root_module = wasm_mod,
+    });
+    const wasm_step = b.step("wasm", "Build zust-analyzer as WebAssembly module");
+    wasm_step.dependOn(&b.addInstallArtifact(wasm_exe, .{ .dest_dir = .{ .override = .bin } }).step);
+
     // Analyzer tests
     const analyzer_test_step = b.step("test-analyzer", "Run analyzer tests");
     const analyzer_test_mod = b.createModule(.{
@@ -156,10 +171,7 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("analyzer/src/LSP.zig"));
     run_analyzer.addFileArg(b.path("analyzer/src/JSONRPC.zig"));
     run_analyzer.addFileArg(b.path("analyzer/src/Contract.zig"));
-    // NOTE: transpiler.zig is not yet in the analyzer list due to a pre-existing
-    // analyzer bug in markReadsInExpr that crashes on certain AST structures.
-    // The transpiler is fully dog-food'd with safe types internally.
-    // TODO: Fix analyzer crash then re-add: run_analyzer.addFileArg(b.path("tools/transpiler.zig"));
+    run_analyzer.addFileArg(b.path("tools/transpiler.zig"));
 
     // Pass options
     run_analyzer.addArg(b.fmt("--strictness={s}", .{strictness}));
@@ -177,12 +189,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
     });
     http_example_mod.addImport("safe", safe_module);
-    // GuardedSlice is not yet re-exported from safe.zig, so we expose it
-    // as a separate module for the example.
-    const offsetguard_mod = b.createModule(.{
-        .root_source_file = b.path("lib/OffsetGuard.zig"),
-    });
-    http_example_mod.addImport("offsetguard", offsetguard_mod);
     const http_example = b.addExecutable(.{
         .name = "http_server",
         .root_module = http_example_mod,

@@ -22,6 +22,11 @@ pub fn ArrayList(comptime T: type) type {
             };
         }
 
+        /// Create an empty list (same as `init`).
+        pub fn initDefault(allocator: std.mem.Allocator) Self {
+            return init(allocator);
+        }
+
         pub fn deinit(self: *Self) void {
             // Must not have outstanding borrows
             if (self.outstanding_imm > 0) {
@@ -49,6 +54,18 @@ pub fn ArrayList(comptime T: type) type {
 
         pub fn len(self: *const Self) usize {
             return self.items.items.len;
+        }
+
+        /// Find the last item equal to `byte`. Only valid for byte-sized types.
+        pub fn findLast(self: *const Self, byte: u8) ?usize {
+            comptime if (@sizeOf(T) != 1) @compileError("findLast only supported for byte-sized types");
+            if (self.items.items.len == 0) return null;
+            var i: usize = self.items.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (self.items.items[i].ptr.* == byte) return i;
+            }
+            return null;
         }
 
         /// Get an item by value (transfers ownership OUT of the list).
@@ -433,4 +450,10 @@ test "ArrayList sort" {
     try std.testing.expectEqual(list.items.items[0].ptr.*, 10);
     try std.testing.expectEqual(list.items.items[1].ptr.*, 20);
     try std.testing.expectEqual(list.items.items[2].ptr.*, 30);
+}
+
+test "ArrayList initDefault" {
+    var list = ArrayList(u32).initDefault(std.testing.allocator);
+    defer list.deinit();
+    try std.testing.expectEqual(list.len(), 0);
 }

@@ -33,6 +33,21 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the analyzer");
     run_step.dependOn(&run_cmd.step);
 
+    // Wasm build step
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
+    const wasm_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    wasm_mod.addImport("safe", safe_module);
+    const wasm_exe = b.addExecutable(.{
+        .name = "zust-analyzer",
+        .root_module = wasm_mod,
+    });
+    const wasm_step = b.step("wasm", "Build zust-analyzer as WebAssembly module");
+    wasm_step.dependOn(&b.addInstallArtifact(wasm_exe, .{ .dest_dir = .{ .override = .bin } }).step);
+
     const test_step = b.step("test", "Run analyzer tests");
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

@@ -1,7 +1,9 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Analysis = @import("Analysis.zig");
 const Diagnostic = @import("Diagnostics.zig");
 const JSONRPC = @import("JSONRPC.zig");
+const Cache = @import("Cache.zig").Cache;
 const zig = std.zig;
 const safe = @import("safe");
 const Box = safe.Box;
@@ -23,6 +25,7 @@ pub const Server = struct {
     gpa: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     analyzer: Box(Analysis.Analyzer, 0, 0, 0),
+    cache: Cache,
     documents: std.StringHashMap(Document),
     client_capabilities: ?std.json.Value,
     notification_writer: ?*std.Io.Writer = null,
@@ -31,7 +34,7 @@ pub const Server = struct {
     const Document = struct {
         uri: []const u8,
         version: i32,
-        source: []const u8,
+        source: safe.String,
     };
 
     pub fn init(gpa: std.mem.Allocator) !Server {
@@ -39,6 +42,7 @@ pub const Server = struct {
             .gpa = gpa,
             .arena = std.heap.ArenaAllocator.init(gpa),
             .analyzer = try Box(Analysis.Analyzer, 0, 0, 0).init(gpa, Analysis.Analyzer.init(gpa)),
+            .cache = Cache.init(gpa),
             .documents = std.StringHashMap(Document).init(gpa),
             .client_capabilities = null,
             .notification_writer = null,
@@ -50,7 +54,7 @@ pub const Server = struct {
         var doc_iter = self.documents.iterator();
         while (doc_iter.next()) |entry| {
             self.gpa.free(entry.value_ptr.uri);
-            self.gpa.free(entry.value_ptr.source);
+            entry.value_ptr.source.deinit();
         }
         self.documents.deinit();
 
@@ -62,6 +66,8 @@ pub const Server = struct {
         analyzer.deinit();
         _ = analyzer_box.deinit();
         self.analyzer = undefined;
+
+        self.cache.deinit();
 
         if (self.client_capabilities) |*caps| {
             var copy = caps.*;
@@ -138,6 +144,8 @@ pub const Server = struct {
             "textDocument/completion",
             "textDocument/definition",
             "textDocument/codeAction",
+            "workspace/symbol",
+            "textDocument/references",
         };
         var matched: usize = methods.len;
         for (methods, 0..) |m, i| {
@@ -150,13 +158,15 @@ pub const Server = struct {
             0 => try self.handleInitialize(msg, writer),
             1 => {}, // No-op
             2 => try self.handleShutdown(msg, writer),
-            3 => std.process.exit(0),
+            3 => if (builtin.target.os.tag != .wasi) std.process.exit(0),
             4 => try self.handleDidOpen(msg),
             5 => try self.handleDidChange(msg),
             6 => try self.handleDidClose(msg),
             7 => try self.handleCompletion(msg, writer),
             8 => try self.handleDefinition(msg, writer),
             9 => try self.handleCodeAction(msg, writer),
+            10 => try self.handleWorkspaceSymbol(msg, writer),
+            11 => try self.handleReferences(msg, writer),
             else => std.log.debug("Unhandled method: {s}", .{method}),
         }
     }
@@ -184,6 +194,8 @@ pub const Server = struct {
         try completion_provider.put(arena_alloc, "triggerCharacters", .{ .array = completion_trigger_chars });
         try capabilities.put(arena_alloc, "completionProvider", .{ .object = completion_provider });
         try capabilities.put(arena_alloc, "definitionProvider", .{ .bool = true });
+        try capabilities.put(arena_alloc, "workspaceSymbolProvider", .{ .bool = true });
+        try capabilities.put(arena_alloc, "referencesProvider", .{ .bool = true });
 
         var server_info: std.json.ObjectMap = .empty;
         try server_info.put(arena_alloc, "name", .{ .string = try arena_alloc.dupe(u8, "zust-analyzer") });
@@ -218,17 +230,24 @@ pub const Server = struct {
         const version = text_doc.object.get("version").?.integer;
         const text = text_doc.object.get("text").?.string;
 
+        // Use cache for AST (avoids re-parsing on re-open)
+        _ = try self.cache.getAst(uri, text);
+
         // Store document
         const uri_copy = try self.gpa.dupe(u8, uri);
-        const source_copy = try self.gpa.dupe(u8, text);
+        errdefer self.gpa.free(uri_copy);
+        var source_string = safe.String.init(self.gpa);
+        errdefer source_string.deinit();
+        try source_string.append(text);
+
+        // Analyze and publish diagnostics
+        try self.analyzeAndPublish(uri, source_string.slice());
+
         try self.documents.put(uri_copy, .{
             .uri = uri_copy,
             .version = @intCast(version),
-            .source = source_copy,
+            .source = source_string,
         });
-
-        // Analyze and publish diagnostics
-        try self.analyzeAndPublish(uri, source_copy);
     }
 
     fn handleDidChange(self: *Server, msg: JSONRPC.Message) !void {
@@ -242,67 +261,43 @@ pub const Server = struct {
 
         // Update document
         if (self.documents.getPtr(uri_str)) |doc| {
-            var current_source = doc.source;
-            var source_modified = false;
+            var arena = std.heap.ArenaAllocator.init(self.gpa);
+            defer arena.deinit();
+            const arena_alloc = arena.allocator();
 
-            for (content_changes.array.items) |change| {
+            const changes = try arena_alloc.alloc(ContentChangeEvent, content_changes.array.items.len);
+            for (content_changes.array.items, 0..) |change, i| {
                 const new_text = change.object.get("text").?.string;
-
                 if (change.object.get("range")) |range| {
-                    // Incremental change
                     const start = range.object.get("start").?;
                     const end = range.object.get("end").?;
-                    const start_line = @as(usize, @intCast(start.object.get("line").?.integer));
-                    const start_char = @as(usize, @intCast(start.object.get("character").?.integer));
-                    const end_line = @as(usize, @intCast(end.object.get("line").?.integer));
-                    const end_char = @as(usize, @intCast(end.object.get("character").?.integer));
-
-                    const start_offset = try lineCharToOffset(current_source, start_line, start_char);
-                    const end_offset = try lineCharToOffset(current_source, end_line, end_char);
-
-                    const new_len = current_source.len - (end_offset - start_offset) + new_text.len;
-                    var new_source = try self.gpa.alloc(u8, new_len);
-                    @memcpy(new_source[0..start_offset], current_source[0..start_offset]);
-                    @memcpy(new_source[start_offset..start_offset + new_text.len], new_text);
-                    @memcpy(new_source[start_offset + new_text.len..], current_source[end_offset..]);
-
-                    if (source_modified) self.gpa.free(current_source);
-                    current_source = new_source;
-                    source_modified = true;
+                    changes[i] = .{
+                        .range = .{
+                            .start = .{
+                                .line = @as(usize, @intCast(start.object.get("line").?.integer)),
+                                .character = @as(usize, @intCast(start.object.get("character").?.integer)),
+                            },
+                            .end = .{
+                                .line = @as(usize, @intCast(end.object.get("line").?.integer)),
+                                .character = @as(usize, @intCast(end.object.get("character").?.integer)),
+                            },
+                        },
+                        .text = new_text,
+                    };
                 } else {
-                    // Full document replacement
-                    if (source_modified) self.gpa.free(current_source);
-                    current_source = try self.gpa.dupe(u8, new_text);
-                    source_modified = true;
+                    changes[i] = .{ .range = null, .text = new_text };
                 }
             }
 
-            // Free old source and update document
-            self.gpa.free(doc.source);
-            doc.source = current_source;
+            try applyIncrementalChanges(&doc.source, changes);
             doc.version += 1;
 
-            // Re-analyze
-            try self.analyzeAndPublish(uri_str, doc.source);
-        }
-    }
+            // Invalidate cache for changed document before re-analyzing
+            self.cache.invalidate(uri_str) catch {};
 
-    fn lineCharToOffset(source: []const u8, line: usize, character: usize) !usize {
-        var current_line: usize = 0;
-        var offset: usize = 0;
-        while (current_line < line and offset < source.len) {
-            if (source[offset] == '\n') {
-                current_line += 1;
-            }
-            offset += 1;
+            // Re-analyze
+            try self.analyzeAndPublish(uri_str, doc.source.slice());
         }
-        // Now at the start of the target line
-        var char_count: usize = 0;
-        while (char_count < character and offset < source.len and source[offset] != '\n') {
-            offset += 1;
-            char_count += 1;
-        }
-        return offset;
     }
 
     fn handleCompletion(self: *Server, msg: JSONRPC.Message, writer: *std.Io.Writer) !void {
@@ -314,7 +309,7 @@ pub const Server = struct {
         const line = @as(usize, @intCast(position.object.get("line").?.integer));
         const character = @as(usize, @intCast(position.object.get("character").?.integer));
         const doc = self.documents.get(uri_str) orelse return;
-        const line_text = getLineText(doc.source, line);
+        const line_text = getLineText(doc.source.slice(), line);
         const prefix = extractPrefix(line_text, character);
         const arena_alloc = self.arena.allocator();
         var completions = std.json.Array.init(arena_alloc);
@@ -354,7 +349,7 @@ pub const Server = struct {
         const line = @as(usize, @intCast(position.object.get("line").?.integer));
         const character = @as(usize, @intCast(position.object.get("character").?.integer));
         const doc = self.documents.get(uri_str) orelse return;
-        const line_text = getLineText(doc.source, line);
+        const line_text = getLineText(doc.source.slice(), line);
         const word = extractWordAtPosition(line_text, character);
         const arena_alloc = self.arena.allocator();
         for (zust_type_files) |tf| {
@@ -409,7 +404,7 @@ pub const Server = struct {
         // Re-analyze to get current diagnostics with fixes
         const analyzer = self.analyzer.unsafePtr();
         analyzer.diagnostics.clearRetainingCapacity();
-        analyzer.analyzeFile(uri_str, doc.source, .Medium) catch return;
+        analyzer.analyzeFile(uri_str, doc.source.slice(), .Medium) catch return;
 
         const arena_alloc = self.arena.allocator();
         var actions = std.json.Array.init(arena_alloc);
@@ -456,6 +451,123 @@ pub const Server = struct {
         try JSONRPC.writeMessage(response, writer, arena_alloc);
     }
 
+    fn handleWorkspaceSymbol(self: *Server, msg: JSONRPC.Message, writer: *std.Io.Writer) !void {
+        const params = msg.params orelse return;
+        const query_val = params.object.get("query") orelse return;
+        const query = query_val.string;
+        const arena_alloc = self.arena.allocator();
+
+        var symbols = std.json.Array.init(arena_alloc);
+
+        var doc_iter = self.documents.iterator();
+        while (doc_iter.next()) |entry| {
+            const doc = entry.value_ptr.*;
+            const source_z = try arena_alloc.dupeZ(u8, doc.source.slice());
+            var ast = try std.zig.Ast.parse(self.gpa, source_z, .zig);
+            defer ast.deinit(self.gpa);
+
+            const root_decls = ast.rootDecls();
+            for (root_decls) |decl| {
+                const node = ast.nodes.get(@intCast(@intFromEnum(decl)));
+                switch (node.tag) {
+                    .fn_decl => {
+                        var buf: [1]std.zig.Ast.Node.Index = undefined;
+                        const fn_proto = ast.fullFnProto(&buf, decl) orelse continue;
+                        const fn_token = fn_proto.ast.fn_token;
+                        const tags = ast.tokens.items(.tag);
+                        if (fn_token + 1 >= tags.len) continue;
+                        if (tags[fn_token + 1] != .identifier) continue;
+                        const name = ast.tokenSlice(fn_token + 1);
+                        if (matchesQuery(query, name)) {
+                            const loc = try tokenToLocation(ast, fn_token + 1, doc.uri, doc.source.slice(), arena_alloc);
+                            try symbols.append(try makeSymbolInformation(name, 12, loc, arena_alloc));
+                        }
+                    },
+                    .simple_var_decl, .aligned_var_decl, .local_var_decl => {
+                        const name_token = node.main_token + 1;
+                        const tags = ast.tokens.items(.tag);
+                        if (name_token >= tags.len) continue;
+                        if (tags[name_token] != .identifier) continue;
+                        const name = ast.tokenSlice(name_token);
+                        if (matchesQuery(query, name)) {
+                            const kind = getVarDeclKind(ast, decl);
+                            const loc = try tokenToLocation(ast, name_token, doc.uri, doc.source.slice(), arena_alloc);
+                            try symbols.append(try makeSymbolInformation(name, kind, loc, arena_alloc));
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        const response = JSONRPC.Message{
+            .jsonrpc = "2.0",
+            .id = msg.id,
+            .result = .{ .array = symbols },
+        };
+        try JSONRPC.writeMessage(response, writer, arena_alloc);
+    }
+
+    fn handleReferences(self: *Server, msg: JSONRPC.Message, writer: *std.Io.Writer) !void {
+        const params = msg.params orelse return;
+        const text_doc = params.object.get("textDocument") orelse return;
+        const uri = text_doc.object.get("uri") orelse return;
+        const uri_str = uri.string;
+        const position = params.object.get("position") orelse return;
+        const line = @as(usize, @intCast(position.object.get("line").?.integer));
+        const character = @as(usize, @intCast(position.object.get("character").?.integer));
+
+        const doc = self.documents.get(uri_str) orelse return;
+
+        const arena_alloc = self.arena.allocator();
+        const source_z = try arena_alloc.dupeZ(u8, doc.source.slice());
+        var ast = try std.zig.Ast.parse(self.gpa, source_z, .zig);
+        defer ast.deinit(self.gpa);
+
+        const identifier = findIdentifierAtPosition(ast, source_z, line, character) orelse {
+            try self.writeNullResponse(msg, writer);
+            return;
+        };
+
+        var locations = std.json.Array.init(arena_alloc);
+
+        // Scan all tokens in the current document
+        const tags = ast.tokens.items(.tag);
+        const starts = ast.tokens.items(.start);
+        for (tags, 0..) |tag, i| {
+            if (tag != .identifier) continue;
+            const name = ast.tokenSlice(@intCast(i));
+            if (!std.mem.eql(u8, name, identifier)) continue;
+
+            const start = starts[i];
+            const end = if (i + 1 < starts.len) starts[i + 1] else source_z.len;
+            const pos = byteOffsetToPosition(source_z, start);
+            const end_pos = byteOffsetToPosition(source_z, end);
+
+            var loc: std.json.ObjectMap = .empty;
+            var range: std.json.ObjectMap = .empty;
+            var start_obj: std.json.ObjectMap = .empty;
+            try start_obj.put(arena_alloc, "line", .{ .integer = pos.line });
+            try start_obj.put(arena_alloc, "character", .{ .integer = pos.character });
+            var end_obj: std.json.ObjectMap = .empty;
+            try end_obj.put(arena_alloc, "line", .{ .integer = end_pos.line });
+            try end_obj.put(arena_alloc, "character", .{ .integer = end_pos.character });
+            try range.put(arena_alloc, "start", .{ .object = start_obj });
+            try range.put(arena_alloc, "end", .{ .object = end_obj });
+            const uri_copy = try arena_alloc.dupe(u8, uri_str);
+            try loc.put(arena_alloc, "uri", .{ .string = uri_copy });
+            try loc.put(arena_alloc, "range", .{ .object = range });
+            try locations.append(.{ .object = loc });
+        }
+
+        const response = JSONRPC.Message{
+            .jsonrpc = "2.0",
+            .id = msg.id,
+            .result = .{ .array = locations },
+        };
+        try JSONRPC.writeMessage(response, writer, arena_alloc);
+    }
+
     fn handleDidClose(self: *Server, msg: JSONRPC.Message) !void {
         const params = msg.params orelse return;
 
@@ -465,8 +577,12 @@ pub const Server = struct {
 
         if (self.documents.fetchRemove(uri_str)) |kv| {
             self.gpa.free(kv.value.uri);
-            self.gpa.free(kv.value.source);
+            var source = kv.value.source;
+            source.deinit();
         }
+
+        // Clear cache for closed document
+        self.cache.invalidate(uri_str) catch {};
 
         // Clear diagnostics for closed document
         try self.publishDiagnostics(uri_str, &.{});
@@ -476,14 +592,12 @@ pub const Server = struct {
         // Dog-food safe.Box: borrow the analyzer to call methods
         const analyzer = self.analyzer.unsafePtr();
 
-        // Clear previous diagnostics
-        analyzer.diagnostics.clearRetainingCapacity();
-
-        // Run analysis
-        analyzer.analyzeFile(uri, source, .Medium) catch |err| {
+        // Run analysis through cache (avoids re-parsing when unchanged)
+        var result = self.cache.getAnalysis(uri, source, analyzer, .Medium) catch |err| {
             std.log.err("Analysis error: {s}", .{@errorName(err)});
             return;
         };
+        defer result.deinit();
 
         // Convert diagnostics to LSP format
         var lsp_diags: std.ArrayList(LSPDiagnostic) = .empty;
@@ -494,7 +608,7 @@ pub const Server = struct {
             lsp_diags.deinit(self.gpa);
         }
 
-        for (analyzer.diagnostics.items) |diag| {
+        for (result.diagnostics.items) |diag| {
             if (diag.severity == .Info) continue; // Skip placeholder "no violations" message
 
             const line = if (diag.location.line > 0) diag.location.line - 1 else 0;
@@ -519,10 +633,14 @@ pub const Server = struct {
         try self.publishDiagnostics(uri, lsp_diags.items);
 
         // Dog-food safe.LinkedList: track diagnostic history
-        for (analyzer.diagnostics.items) |diag| {
+        for (result.diagnostics.items) |diag| {
             if (diag.severity == .Info) continue;
             var diag_copy = diag;
             diag_copy.message = try self.gpa.dupe(u8, diag.message);
+            // Fix and notes are owned by the cache result which will be deinit'd;
+            // history only frees message, so clear the other pointers to avoid leaks.
+            diag_copy.fix = null;
+            diag_copy.notes = &.{};
             self.diagnostic_history.push(diag_copy) catch {};
         }
     }
@@ -726,7 +844,42 @@ pub const Server = struct {
             character: i32,
         };
     };
+
+    pub fn getDocumentSource(self: *Server, uri: []const u8) ?[]const u8 {
+        if (self.documents.get(uri)) |doc| {
+            return doc.source.slice();
+        }
+        return null;
+    }
 };
+
+pub const ContentChangeEvent = struct {
+    range: ?Range,
+    text: []const u8,
+
+    pub const Range = struct {
+        start: Position,
+        end: Position,
+    };
+
+    pub const Position = struct {
+        line: usize,
+        character: usize,
+    };
+};
+
+pub fn applyIncrementalChanges(document: *safe.String, changes: []const ContentChangeEvent) !void {
+    for (changes) |change| {
+        if (change.range) |range| {
+            const start_offset = try lineCharToOffset(document.slice(), range.start.line, range.start.character);
+            const end_offset = try lineCharToOffset(document.slice(), range.end.line, range.end.character);
+            try document.replaceRange(start_offset, end_offset, change.text);
+        } else {
+            document.clear();
+            try document.append(change.text);
+        }
+    }
+}
 
 test "getLineText extracts correct line" {
     const source = "line one\nline two\nline three";
@@ -787,6 +940,24 @@ test "go-to-definition returns correct file for Box" {
     try std.testing.expect(found);
 }
 
+fn lineCharToOffset(source: []const u8, line: usize, character: usize) !usize {
+    var current_line: usize = 0;
+    var offset: usize = 0;
+    while (current_line < line and offset < source.len) {
+        if (source[offset] == '\n') {
+            current_line += 1;
+        }
+        offset += 1;
+    }
+    // Now at the start of the target line
+    var char_count: usize = 0;
+    while (char_count < character and offset < source.len and source[offset] != '\n') {
+        offset += 1;
+        char_count += 1;
+    }
+    return offset;
+}
+
 fn getLineText(source: []const u8, line: usize) []const u8 {
     var current_line: usize = 0;
     var offset: usize = 0;
@@ -832,5 +1003,91 @@ fn extractWordAtPosition(line_text: []const u8, character: usize) []const u8 {
         end += 1;
     }
     return line_text[start..end];
+}
+
+fn matchesQuery(query: []const u8, name: []const u8) bool {
+    if (query.len == 0) return true;
+    var i: usize = 0;
+    while (i + query.len <= name.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(name[i..i + query.len], query)) return true;
+    }
+    return false;
+}
+
+fn getVarDeclKind(ast: std.zig.Ast, decl: std.zig.Ast.Node.Index) i32 {
+    const var_decl = ast.fullVarDecl(decl) orelse return 13;
+    const init_node = var_decl.ast.init_node.unwrap() orelse return 13;
+    const init_tag = ast.nodes.items(.tag)[@intCast(@intFromEnum(init_node))];
+    switch (init_tag) {
+        .container_decl, .container_decl_trailing, .container_decl_two, .container_decl_two_trailing => {
+            const init_main_token = ast.nodes.items(.main_token)[@intCast(@intFromEnum(init_node))];
+            const keyword = ast.tokenSlice(init_main_token);
+            if (std.mem.eql(u8, keyword, "enum")) return 10;
+            return 23;
+        },
+        else => return 13,
+    }
+}
+
+fn tokenToLocation(ast: std.zig.Ast, token_index: std.zig.Ast.TokenIndex, uri: []const u8, source: []const u8, arena_alloc: std.mem.Allocator) !std.json.ObjectMap {
+    const starts = ast.tokens.items(.start);
+    const start = starts[token_index];
+    const end = if (token_index + 1 < starts.len) starts[token_index + 1] else source.len;
+    const pos = byteOffsetToPosition(source, start);
+    const end_pos = byteOffsetToPosition(source, end);
+
+    var loc: std.json.ObjectMap = .empty;
+    var range: std.json.ObjectMap = .empty;
+    var start_obj: std.json.ObjectMap = .empty;
+    try start_obj.put(arena_alloc, "line", .{ .integer = pos.line });
+    try start_obj.put(arena_alloc, "character", .{ .integer = pos.character });
+    var end_obj: std.json.ObjectMap = .empty;
+    try end_obj.put(arena_alloc, "line", .{ .integer = end_pos.line });
+    try end_obj.put(arena_alloc, "character", .{ .integer = end_pos.character });
+    try range.put(arena_alloc, "start", .{ .object = start_obj });
+    try range.put(arena_alloc, "end", .{ .object = end_obj });
+    const uri_copy = try arena_alloc.dupe(u8, uri);
+    try loc.put(arena_alloc, "uri", .{ .string = uri_copy });
+    try loc.put(arena_alloc, "range", .{ .object = range });
+    return loc;
+}
+
+fn makeSymbolInformation(name: []const u8, kind: i32, location: std.json.ObjectMap, arena_alloc: std.mem.Allocator) !std.json.Value {
+    var sym: std.json.ObjectMap = .empty;
+    const name_copy = try arena_alloc.dupe(u8, name);
+    try sym.put(arena_alloc, "name", .{ .string = name_copy });
+    try sym.put(arena_alloc, "kind", .{ .integer = kind });
+    try sym.put(arena_alloc, "location", .{ .object = location });
+    return .{ .object = sym };
+}
+
+fn findIdentifierAtPosition(ast: std.zig.Ast, source: []const u8, line: usize, character: usize) ?[]const u8 {
+    const offset = lineCharToOffset(source, line, character) catch return null;
+    const tags = ast.tokens.items(.tag);
+    const starts = ast.tokens.items(.start);
+    var i: usize = 0;
+    while (i < tags.len) : (i += 1) {
+        if (tags[i] != .identifier) continue;
+        const start = starts[i];
+        const end = if (i + 1 < starts.len) starts[i + 1] else source.len;
+        if (start <= offset and offset < end) {
+            return ast.tokenSlice(@intCast(i));
+        }
+    }
+    return null;
+}
+
+fn byteOffsetToPosition(source: []const u8, offset: usize) struct { line: i32, character: i32 } {
+    var line: i32 = 0;
+    var line_start: usize = 0;
+    var i: usize = 0;
+    while (i < offset and i < source.len) : (i += 1) {
+        if (source[i] == '\n') {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+    const character = @as(i32, @intCast(offset - line_start));
+    return .{ .line = line, .character = character };
 }
 

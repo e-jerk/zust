@@ -17,6 +17,11 @@ pub const String = struct {
         };
     }
 
+    /// Create an empty string (same as `init`).
+    pub fn initDefault(allocator: std.mem.Allocator) Self {
+        return init(allocator);
+    }
+
     /// Create a string from an existing byte slice.
     pub fn initFromSlice(allocator: std.mem.Allocator, data: []const u8) !Self {
         var self = init(allocator);
@@ -76,10 +81,7 @@ pub const String = struct {
 
     /// Return true if the string contains the given substring.
     pub fn contains(self: *const Self, needle: []const u8) bool {
-        if (needle.len == 1) {
-            return SimdUtils.findByte(self.slice(), needle[0]) != null;
-        }
-        return std.mem.indexOf(u8, self.slice(), needle) != null;
+        return SimdUtils.contains(self.slice(), needle);
     }
 
     /// Return the index of the first occurrence of the substring, or null.
@@ -88,6 +90,31 @@ pub const String = struct {
             return SimdUtils.findByte(self.slice(), needle[0]);
         }
         return std.mem.indexOf(u8, self.slice(), needle);
+    }
+
+    /// Return the index of the last occurrence of a byte, or null.
+    pub fn findLast(self: *const Self, byte: u8) ?usize {
+        return SimdUtils.findByteReverse(self.slice(), byte);
+    }
+
+    /// Return the count of non-overlapping occurrences of a substring.
+    pub fn count(self: *const Self, needle: []const u8) u64 {
+        return SimdUtils.countSubstring(self.slice(), needle);
+    }
+
+    /// Return a new string with leading chars from the set removed.
+    pub fn trimLeft(self: *const Self, chars: []const u8) Self {
+        return initFromSlice(self.allocator, SimdUtils.trimLeft(self.slice(), chars)) catch unreachable;
+    }
+
+    /// Return a new string with trailing chars from the set removed.
+    pub fn trimRight(self: *const Self, chars: []const u8) Self {
+        return initFromSlice(self.allocator, SimdUtils.trimRight(self.slice(), chars)) catch unreachable;
+    }
+
+    /// Return true if the string equals another string, case-insensitively (ASCII only).
+    pub fn eqlIgnoreCase(self: *const Self, other: []const u8) bool {
+        return SimdUtils.eqlIgnoreCase(self.slice(), other);
     }
 
     /// Replace all occurrences of `from` with `to` in place.
@@ -107,6 +134,21 @@ pub const String = struct {
                 break;
             }
         }
+
+        self.buffer.deinit(self.allocator);
+        self.buffer = new_buffer;
+    }
+
+    /// Replace a byte range [start, end) with replacement text.
+    pub fn replaceRange(self: *Self, start: usize, end: usize, replacement: []const u8) !void {
+        const old_len = self.buffer.items.len;
+
+        var new_buffer = std.ArrayList(u8).empty;
+        errdefer new_buffer.deinit(self.allocator);
+
+        try new_buffer.appendSlice(self.allocator, self.buffer.items[0..start]);
+        try new_buffer.appendSlice(self.allocator, replacement);
+        try new_buffer.appendSlice(self.allocator, self.buffer.items[end..old_len]);
 
         self.buffer.deinit(self.allocator);
         self.buffer = new_buffer;
@@ -208,10 +250,38 @@ pub const String = struct {
         return .{ .slice = self.slice(), .index = 0 };
     }
 
-    /// UTF-8 char iteration requires a decoder. Use std.unicode.Utf8View for now.
-    pub fn chars(self: *const Self) void {
-        _ = self;
-        @compileError("UTF-8 char iteration not yet implemented. Use std.unicode.Utf8View for now.");
+    pub const StringIterator = struct {
+        bytes: []const u8,
+        pos: usize,
+
+        pub fn next(self: *StringIterator) ?u21 {
+            if (self.pos >= self.bytes.len) return null;
+
+            const seq_len = std.unicode.utf8ByteSequenceLength(self.bytes[self.pos]) catch {
+                self.pos += 1;
+                return self.next();
+            };
+
+            if (self.pos + seq_len > self.bytes.len) {
+                self.pos = self.bytes.len;
+                return null;
+            }
+
+            const cp = std.unicode.utf8Decode(self.bytes[self.pos..self.pos + seq_len]) catch {
+                self.pos += 1;
+                return self.next();
+            };
+
+            self.pos += seq_len;
+            return cp;
+        }
+    };
+
+    pub fn iterator(self: *const Self) StringIterator {
+        return .{
+            .bytes = self.slice(),
+            .pos = 0,
+        };
     }
 };
 
@@ -275,6 +345,13 @@ test "String empty after init" {
     try std.testing.expectEqualStrings(s.slice(), "");
 }
 
+test "String initDefault" {
+    var s = String.initDefault(std.testing.allocator);
+    defer s.deinit();
+    try std.testing.expect(s.isEmpty());
+    try std.testing.expectEqual(s.len(), 0);
+}
+
 test "String startsWith" {
     var s = try String.initFromSlice(std.testing.allocator, "hello world");
     defer s.deinit();
@@ -301,6 +378,43 @@ test "String find" {
     defer s.deinit();
     try std.testing.expectEqual(s.find("world"), 6);
     try std.testing.expectEqual(s.find("xyz"), null);
+}
+
+test "String findLast" {
+    var s = try String.initFromSlice(std.testing.allocator, "hello world");
+    defer s.deinit();
+    try std.testing.expectEqual(s.findLast('l'), 9);
+    try std.testing.expectEqual(s.findLast('z'), null);
+}
+
+test "String count" {
+    var s = try String.initFromSlice(std.testing.allocator, "hello world");
+    defer s.deinit();
+    try std.testing.expectEqual(s.count("l"), 3);
+    try std.testing.expectEqual(s.count("xyz"), 0);
+}
+
+test "String trimLeft" {
+    var s = try String.initFromSlice(std.testing.allocator, "xxhello");
+    defer s.deinit();
+    var t = s.trimLeft("x");
+    defer t.deinit();
+    try std.testing.expectEqualStrings(t.slice(), "hello");
+}
+
+test "String trimRight" {
+    var s = try String.initFromSlice(std.testing.allocator, "helloxx");
+    defer s.deinit();
+    var t = s.trimRight("x");
+    defer t.deinit();
+    try std.testing.expectEqualStrings(t.slice(), "hello");
+}
+
+test "String eqlIgnoreCase" {
+    var s = try String.initFromSlice(std.testing.allocator, "Hello");
+    defer s.deinit();
+    try std.testing.expect(s.eqlIgnoreCase("hello"));
+    try std.testing.expect(!s.eqlIgnoreCase("world"));
 }
 
 test "String replace single" {
@@ -409,5 +523,21 @@ test "String bytes" {
     try std.testing.expectEqual(it.next().?, 'a');
     try std.testing.expectEqual(it.next().?, 'b');
     try std.testing.expectEqual(it.next().?, 'c');
+    try std.testing.expect(it.next() == null);
+}
+
+test "String iterator UTF-8" {
+    var s = try String.initFromSlice(std.testing.allocator, "Hello 世界");
+    defer s.deinit();
+
+    var it = s.iterator();
+    try std.testing.expectEqual(it.next().?, 'H');
+    try std.testing.expectEqual(it.next().?, 'e');
+    try std.testing.expectEqual(it.next().?, 'l');
+    try std.testing.expectEqual(it.next().?, 'l');
+    try std.testing.expectEqual(it.next().?, 'o');
+    try std.testing.expectEqual(it.next().?, ' ');
+    try std.testing.expectEqual(it.next().?, '世');
+    try std.testing.expectEqual(it.next().?, '界');
     try std.testing.expect(it.next() == null);
 }

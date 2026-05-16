@@ -97,6 +97,8 @@ const FunctionInfo = struct {
     return_ownership: Contract.Ownership = .unknown,
     /// Ownership contracts for parameters (index 0..7, fixed buffer)
     param_contracts: [8]Contract.Ownership = .{.unknown} ** 8,
+    /// Does this function have callconv(.Async)?
+    is_async: bool = false,
 };
 
 /// Main analysis engine.
@@ -118,6 +120,8 @@ pub const Analyzer = struct {
     has_try: bool = false,
     /// Variables deinit'd in errdefer blocks (name -> {})
     errdefer_deinits: std.StringHashMap(void),
+    /// Variables deinit'd in defer blocks (applied at end of scope)
+    deferred_deinits: std.StringHashMap(void),
     /// Variables that have been bounds-checked in current scope
     bounds_checked_vars: std.StringHashMap(void),
 
@@ -134,6 +138,7 @@ pub const Analyzer = struct {
             .thread_spawns = false,
             .has_try = false,
             .errdefer_deinits = std.StringHashMap(void).init(gpa),
+            .deferred_deinits = std.StringHashMap(void).init(gpa),
             .bounds_checked_vars = std.StringHashMap(void).init(gpa),
         };
     }
@@ -163,6 +168,11 @@ pub const Analyzer = struct {
             self.gpa.free(entry.key_ptr.*);
         }
         self.errdefer_deinits.deinit();
+        var dd_iter = self.deferred_deinits.iterator();
+        while (dd_iter.next()) |entry| {
+            self.gpa.free(entry.key_ptr.*);
+        }
+        self.deferred_deinits.deinit();
         var bc_iter = self.bounds_checked_vars.iterator();
         while (bc_iter.next()) |entry| {
             self.gpa.free(entry.key_ptr.*);
@@ -242,6 +252,31 @@ pub const Analyzer = struct {
         }
     }
 
+    pub fn analyzeWorkspaceCached(self: *Analyzer, files: []const WorkspaceFile, strictness: Strictness, cache: anytype) !void {
+        // Phase 1: Build combined function registry from all files using cached ASTs
+        self.clearFunctions();
+        for (files) |file| {
+            if (file.source.len == 0) continue;
+            const ast = try cache.getAst(file.path, file.source);
+            if (ast.errors.len > 0) continue;
+            const decls = ast.rootDecls();
+            for (decls) |decl| {
+                const tag = ast.nodes.items(.tag)[@intFromEnum(decl)];
+                if (tag == .fn_decl) {
+                    try self.buildFunctionRegistry(file.path, ast, @intFromEnum(decl));
+                }
+            }
+        }
+
+        // Phase 2: Analyze each file with the combined registry using cached ASTs
+        for (files) |file| {
+            if (file.source.len == 0) continue;
+            self.clearVariables();
+            const ast = try cache.getAst(file.path, file.source);
+            try self.analyzeFileWithAst(file.path, ast, strictness);
+        }
+    }
+
     fn clearVariables(self: *Analyzer) void {
         var iter = self.variables.iterator();
         while (iter.next()) |entry| {
@@ -282,23 +317,12 @@ pub const Analyzer = struct {
         }
     }
 
-    fn analyzeFileWithRegistry(self: *Analyzer, file_path: []const u8, source: []const u8, strictness: Strictness) !void {
+    /// Analyze a file using an already-parsed AST. This avoids re-parsing
+    /// when the AST is available from a cache.
+    pub fn analyzeFileWithAst(self: *Analyzer, file_path: []const u8, ast: *const std.zig.Ast, strictness: Strictness) !void {
         self.strictness = strictness;
 
-        // Parse the source into an AST, managed by safe.Box for single ownership
-        const source_z = try self.gpa.dupeZ(u8, source);
-        defer self.gpa.free(source_z);
-
-        var ast_box = try Box(std.zig.Ast, 0, 0, 0).init(self.gpa, undefined);
-        ast_box.ptr.* = try std.zig.Ast.parse(self.gpa, source_z, .zig);
-        // Ensure Ast is deinit'd exactly once via Box ownership
-        defer {
-            ast_box.ptr.deinit(self.gpa);
-            const dead = ast_box.deinit();
-            _ = dead;
-        }
-
-        if (ast_box.ptr.errors.len > 0) {
+        if (ast.errors.len > 0) {
             try self.diagnostics.append(self.gpa, .{
                 .kind = .UseAfterFree,
                 .message = "parse errors in source file",
@@ -313,26 +337,42 @@ pub const Analyzer = struct {
             return;
         }
 
-        // Pass 1: Build function signature registry (for single-file mode this was already done)
-        // In workspace mode, this is a no-op because registry is already populated
-        const decls = ast_box.ptr.rootDecls();
+        // Pass 1: Build function signature registry
+        const decls = ast.rootDecls();
         for (decls) |decl| {
-            const tag = ast_box.ptr.nodes.items(.tag)[@intFromEnum(decl)];
+            const tag = ast.nodes.items(.tag)[@intFromEnum(decl)];
             if (tag == .fn_decl) {
-                try self.buildFunctionRegistry(file_path, ast_box.ptr, @intFromEnum(decl));
+                try self.buildFunctionRegistry(file_path, ast, @intFromEnum(decl));
             }
         }
 
         // Pass 2: Analyze all function bodies with cross-function knowledge
         for (decls) |decl| {
-            const tag = ast_box.ptr.nodes.items(.tag)[@intFromEnum(decl)];
+            const tag = ast.nodes.items(.tag)[@intFromEnum(decl)];
             if (tag == .fn_decl) {
-                try self.analyzeFnDecl(file_path, ast_box.ptr, @intFromEnum(decl));
+                try self.analyzeFnDecl(file_path, ast, @intFromEnum(decl));
             }
         }
 
         // Pass 3: Check for raw builtins across entire file
-        try self.checkBuiltins(file_path, ast_box.ptr);
+        try self.checkBuiltins(file_path, ast);
+    }
+
+    fn analyzeFileWithRegistry(self: *Analyzer, file_path: []const u8, source: []const u8, strictness: Strictness) !void {
+        // Parse the source into an AST, managed by safe.Box for single ownership
+        const source_z = try self.gpa.dupeZ(u8, source);
+        defer self.gpa.free(source_z);
+
+        var ast_box = try Box(std.zig.Ast, 0, 0, 0).init(self.gpa, undefined);
+        ast_box.ptr.* = try std.zig.Ast.parse(self.gpa, source_z, .zig);
+        // Ensure Ast is deinit'd exactly once via Box ownership
+        defer {
+            ast_box.ptr.deinit(self.gpa);
+            const dead = ast_box.deinit();
+            _ = dead;
+        }
+
+        try self.analyzeFileWithAst(file_path, ast_box.ptr, strictness);
     }
 
     /// Pass 1: Extract function signature information for cross-function analysis.
@@ -414,6 +454,19 @@ pub const Analyzer = struct {
                 }
             }
 
+            // Detect async calling convention: callconv(.Async)
+            var is_async = false;
+            if (fn_proto.ast.callconv_expr.unwrap()) |cc_expr| {
+                const cc_tag = ast.nodes.items(.tag)[@intFromEnum(cc_expr)];
+                if (cc_tag == .enum_literal) {
+                    const cc_token = ast.nodes.items(.main_token)[@intFromEnum(cc_expr)];
+                    const cc_name = ast.tokenSlice(cc_token);
+                    if (std.mem.eql(u8, cc_name, "Async")) {
+                        is_async = true;
+                    }
+                }
+            }
+
             // Emit return type warning (after contract check so we can skip if contract says owned)
             if (returns_raw and return_ownership != .owned) {
                 try self.addDiagnostic(file_path, .UseAfterFree, "function returns raw pointer/slice; consider returning safe.Box(T, 0, 0, 0) instead", @intCast(token_loc.line), @intCast(token_loc.column));
@@ -435,6 +488,7 @@ pub const Analyzer = struct {
                         .has_nocapture_annotation = has_nocapture,
                         .return_ownership = return_ownership,
                         .param_contracts = param_contracts,
+                        .is_async = is_async,
                     });
                 }
             } else {
@@ -493,6 +547,11 @@ pub const Analyzer = struct {
             self.gpa.free(entry.key_ptr.*);
         }
         self.errdefer_deinits.clearRetainingCapacity();
+        var dd_iter = self.deferred_deinits.iterator();
+        while (dd_iter.next()) |entry| {
+            self.gpa.free(entry.key_ptr.*);
+        }
+        self.deferred_deinits.clearRetainingCapacity();
         var bc_iter = self.bounds_checked_vars.iterator();
         while (bc_iter.next()) |entry| {
             self.gpa.free(entry.key_ptr.*);
@@ -501,6 +560,15 @@ pub const Analyzer = struct {
 
         // Analyze the function body
         try self.analyzeBlock(file_path, ast, body_node);
+
+        // Apply deferred deinits (defer blocks run at scope exit)
+        var deferred_iter = self.deferred_deinits.iterator();
+        while (deferred_iter.next()) |entry| {
+            if (self.variables.getPtr(entry.key_ptr.*)) |var_state| {
+                var_state.is_live = false;
+                var_state.has_cleanup = true;
+            }
+        }
 
         // Check for leaks and unclosed resources at end of function
         var var_iter = self.variables.iterator();
@@ -614,6 +682,23 @@ pub const Analyzer = struct {
                 try self.checkDerefs(file_path, ast, data.node);
                 try self.markReadsInExpr(file_path, ast, data.node);
             },
+            .@"defer" => {
+                // Defer body runs at scope exit; analyze it to find deinits
+                // but don't apply state changes immediately.
+                const data = ast.nodes.items(.data)[@intFromEnum(stmt)];
+                const body = data.node;
+                var saved = try self.cloneVariables();
+                defer {
+                    var it = saved.iterator();
+                    while (it.next()) |entry| {
+                        self.gpa.free(entry.key_ptr.*);
+                    }
+                    saved.deinit();
+                }
+                try self.analyzeStatement(file_path, ast, body);
+                try self.recordDeferredDeinits(saved);
+                try self.restoreVariables(saved);
+            },
             .@"errdefer" => {
                 // Errdefer body executes only on error paths.
                 // We analyze it to catch error-path deallocations.
@@ -638,6 +723,8 @@ pub const Analyzer = struct {
                 try self.findCallsInExpr(file_path, ast, stmt);
                 // Check for raw pointer dereferences
                 try self.checkDerefs(file_path, ast, stmt);
+                // Mark reads and check for uninitialized variables
+                try self.markReadsInExpr(file_path, ast, stmt);
             },
         }
     }
@@ -1117,13 +1204,9 @@ pub const Analyzer = struct {
                     }
                 },
                 .call, .call_comma => {
-                    const extra = ast.extra_data[@intFromEnum(data.node_and_extra[1])..];
-                    const arg_count = extra[0];
-                    const u32_slice = extra[1 .. 1 + arg_count];
-                    const casted = try self.gpa.alloc(zig.Ast.Node.Index, u32_slice.len);
-                    for (u32_slice, 0..) |val, i| {
-                        casted[i] = @enumFromInt(val);
-                    }
+                    const call_info = ast.callFull(node);
+                    const casted = try self.gpa.alloc(zig.Ast.Node.Index, call_info.ast.params.len);
+                    @memcpy(casted, call_info.ast.params);
                     arg_nodes = casted;
                     needs_free = true;
                 },
@@ -1164,6 +1247,24 @@ pub const Analyzer = struct {
                                 // Pointer from a Box is escaping to another function
                                 // (Skip if callee has @safe(nocapture) annotation)
                                 try self.addDiagnostic(file_path, .PointerEscape, "raw pointer from Box escapes to function call; callee may deallocate or alias it", @intCast(token_loc.line), @intCast(token_loc.column));
+                            }
+                        }
+
+                        // Async function use-after-move check
+                        if (fn_info.is_async) {
+                            if (var_state.is_live and isZustType(var_state.type_category)) {
+                                try self.addDiagnostic(file_path, .UseAfterMove, "value moved into async function call; subsequent use is a use-after-move", @intCast(token_loc.line), @intCast(token_loc.column));
+                                var_state.is_live = false;
+                                var derived_iter = self.variables.iterator();
+                                while (derived_iter.next()) |entry| {
+                                    const other = entry.value_ptr;
+                                    if (other.origin == .RawFromBox and std.mem.eql(u8, other.origin.RawFromBox.box_var, name) and other.is_live) {
+                                        try self.addDiagnostic(file_path, .UseAfterMove, "dangling pointer after passing Box to async function", other.decl_line, other.decl_col);
+                                        other.is_live = false;
+                                    }
+                                }
+                            } else if (var_state.origin == .Borrow or var_state.origin == .RawFromBox) {
+                                try self.addDiagnostic(file_path, .UseAfterFree, "borrowed pointer passed to async function; may dangle when frame suspends", @intCast(token_loc.line), @intCast(token_loc.column));
                             }
                         }
                     }
@@ -1435,10 +1536,9 @@ pub const Analyzer = struct {
                         }
                     },
                     .call, .call_comma => {
-                        const extra = ast.extra_data[@intFromEnum(data.node_and_extra[1])..];
-                        const arg_count = extra[0];
-                        for (extra[1 .. 1 + arg_count]) |arg_idx| {
-                            try self.checkDerefs(file_path, ast, @enumFromInt(arg_idx));
+                        const call_info = ast.callFull(node);
+                        for (call_info.ast.params) |arg| {
+                            try self.checkDerefs(file_path, ast, arg);
                         }
                     },
                     else => {},
@@ -1486,6 +1586,75 @@ pub const Analyzer = struct {
                         try self.checkDerefs(file_path, ast, data.node_and_node[0]);
                         try self.checkDerefs(file_path, ast, data.node_and_node[1]);
                     },
+                    .@"while" => {
+                        const while_info = ast.whileFull(node);
+                        try self.checkDerefs(file_path, ast, while_info.ast.cond_expr);
+                        if (while_info.ast.cont_expr.unwrap()) |cont| {
+                            try self.checkDerefs(file_path, ast, cont);
+                        }
+                        try self.checkDerefs(file_path, ast, while_info.ast.then_expr);
+                        if (while_info.ast.else_expr.unwrap()) |else_body| {
+                            try self.checkDerefs(file_path, ast, else_body);
+                        }
+                    },
+                    .@"switch", .switch_comma => {
+                        const switch_info = ast.switchFull(node);
+                        try self.checkDerefs(file_path, ast, switch_info.ast.condition);
+                        for (switch_info.ast.cases) |case| {
+                            try self.checkDerefs(file_path, ast, case);
+                        }
+                    },
+                    .switch_case_one, .switch_case_inline_one => {
+                        const case_info = ast.switchCaseOne(node);
+                        for (case_info.ast.values) |val| {
+                            try self.checkDerefs(file_path, ast, val);
+                        }
+                        try self.checkDerefs(file_path, ast, case_info.ast.target_expr);
+                    },
+                    .switch_case, .switch_case_inline => {
+                        const case_info = ast.switchCase(node);
+                        for (case_info.ast.values) |val| {
+                            try self.checkDerefs(file_path, ast, val);
+                        }
+                        try self.checkDerefs(file_path, ast, case_info.ast.target_expr);
+                    },
+                    .for_simple => {
+                        const for_info = ast.forSimple(node);
+                        for (for_info.ast.inputs) |input| {
+                            try self.checkDerefs(file_path, ast, input);
+                        }
+                        try self.checkDerefs(file_path, ast, for_info.ast.then_expr);
+                    },
+                    .@"for" => {
+                        const for_info = ast.forFull(node);
+                        for (for_info.ast.inputs) |input| {
+                            try self.checkDerefs(file_path, ast, input);
+                        }
+                        try self.checkDerefs(file_path, ast, for_info.ast.then_expr);
+                        if (for_info.ast.else_expr.unwrap()) |else_body| {
+                            try self.checkDerefs(file_path, ast, else_body);
+                        }
+                    },
+                    .for_range => {
+                        try self.checkDerefs(file_path, ast, data.node_and_opt_node[0]);
+                        if (data.node_and_opt_node[1].unwrap()) |end| {
+                            try self.checkDerefs(file_path, ast, end);
+                        }
+                    },
+                    .@"defer" => {
+                        try self.checkDerefs(file_path, ast, data.node);
+                    },
+                    .@"errdefer" => {
+                        try self.checkDerefs(file_path, ast, data.opt_token_and_node[1]);
+                    },
+                    .builtin_call, .builtin_call_comma => {
+                        const extra = ast.extra_data[@intFromEnum(data.extra_range.start)..@intFromEnum(data.extra_range.end)];
+                        for (extra) |n| try self.checkDerefs(file_path, ast, @enumFromInt(n));
+                    },
+                    .builtin_call_two, .builtin_call_two_comma => {
+                        if (data.opt_node_and_opt_node[0].unwrap()) |a| try self.checkDerefs(file_path, ast, a);
+                        if (data.opt_node_and_opt_node[1].unwrap()) |b| try self.checkDerefs(file_path, ast, b);
+                    },
                     .assign => {
                         try self.checkDerefs(file_path, ast, data.node_and_node[0]);
                         try self.checkDerefs(file_path, ast, data.node_and_node[1]);
@@ -1512,14 +1681,9 @@ pub const Analyzer = struct {
                 }
             },
             .call, .call_comma => {
-                const extra = ast.extra_data[@intFromEnum(data.node_and_extra[1])..];
-                const arg_count = extra[0];
-                const u32_slice = extra[1 .. 1 + arg_count];
-                // Cast []u32 to []Node.Index
-                const casted = try self.gpa.alloc(zig.Ast.Node.Index, u32_slice.len);
-                for (u32_slice, 0..) |val, i| {
-                    casted[i] = @enumFromInt(val);
-                }
+                const call_info = ast.callFull(node);
+                const casted = try self.gpa.alloc(zig.Ast.Node.Index, call_info.ast.params.len);
+                @memcpy(casted, call_info.ast.params);
                 arg_nodes = casted;
             },
             else => {},
@@ -1538,6 +1702,10 @@ pub const Analyzer = struct {
                     try self.addDiagnostic(file_path, .NotInitialized, "use of uninitialized variable", @intCast(token_loc.line), @intCast(token_loc.column));
                 }
             }
+        }
+
+        if (tag == .call or tag == .call_comma) {
+            self.gpa.free(arg_nodes);
         }
     }
 
@@ -1868,6 +2036,80 @@ pub const Analyzer = struct {
                 try self.findCallsInExpr(file_path, ast, data.node_and_node[0]);
                 try self.findCallsInExpr(file_path, ast, data.node_and_node[1]);
             },
+            .@"while" => {
+                const while_info = ast.whileFull(node);
+                try self.findCallsInExpr(file_path, ast, while_info.ast.cond_expr);
+                if (while_info.ast.cont_expr.unwrap()) |cont| {
+                    try self.findCallsInExpr(file_path, ast, cont);
+                }
+                try self.findCallsInExpr(file_path, ast, while_info.ast.then_expr);
+                if (while_info.ast.else_expr.unwrap()) |else_body| {
+                    try self.findCallsInExpr(file_path, ast, else_body);
+                }
+            },
+            .@"switch", .switch_comma => {
+                const switch_info = ast.switchFull(node);
+                try self.findCallsInExpr(file_path, ast, switch_info.ast.condition);
+                for (switch_info.ast.cases) |case| {
+                    try self.findCallsInExpr(file_path, ast, case);
+                }
+            },
+            .switch_case_one, .switch_case_inline_one => {
+                const case_info = ast.switchCaseOne(node);
+                for (case_info.ast.values) |val| {
+                    try self.findCallsInExpr(file_path, ast, val);
+                }
+                try self.findCallsInExpr(file_path, ast, case_info.ast.target_expr);
+            },
+            .switch_case, .switch_case_inline => {
+                const case_info = ast.switchCase(node);
+                for (case_info.ast.values) |val| {
+                    try self.findCallsInExpr(file_path, ast, val);
+                }
+                try self.findCallsInExpr(file_path, ast, case_info.ast.target_expr);
+            },
+            .for_simple => {
+                const for_info = ast.forSimple(node);
+                for (for_info.ast.inputs) |input| {
+                    try self.findCallsInExpr(file_path, ast, input);
+                }
+                try self.findCallsInExpr(file_path, ast, for_info.ast.then_expr);
+            },
+            .@"for" => {
+                const for_info = ast.forFull(node);
+                for (for_info.ast.inputs) |input| {
+                    try self.findCallsInExpr(file_path, ast, input);
+                }
+                try self.findCallsInExpr(file_path, ast, for_info.ast.then_expr);
+                if (for_info.ast.else_expr.unwrap()) |else_body| {
+                    try self.findCallsInExpr(file_path, ast, else_body);
+                }
+            },
+            .for_range => {
+                const data = ast.nodes.items(.data)[@intFromEnum(node)];
+                try self.findCallsInExpr(file_path, ast, data.node_and_opt_node[0]);
+                if (data.node_and_opt_node[1].unwrap()) |end| {
+                    try self.findCallsInExpr(file_path, ast, end);
+                }
+            },
+            .@"defer" => {
+                const data = ast.nodes.items(.data)[@intFromEnum(node)];
+                try self.findCallsInExpr(file_path, ast, data.node);
+            },
+            .@"errdefer" => {
+                const data = ast.nodes.items(.data)[@intFromEnum(node)];
+                try self.findCallsInExpr(file_path, ast, data.opt_token_and_node[1]);
+            },
+            .builtin_call, .builtin_call_comma => {
+                const data = ast.nodes.items(.data)[@intFromEnum(node)];
+                const extra = ast.extra_data[@intFromEnum(data.extra_range.start)..@intFromEnum(data.extra_range.end)];
+                for (extra) |n| try self.findCallsInExpr(file_path, ast, @enumFromInt(n));
+            },
+            .builtin_call_two, .builtin_call_two_comma => {
+                const data = ast.nodes.items(.data)[@intFromEnum(node)];
+                if (data.opt_node_and_opt_node[0].unwrap()) |a| try self.findCallsInExpr(file_path, ast, a);
+                if (data.opt_node_and_opt_node[1].unwrap()) |b| try self.findCallsInExpr(file_path, ast, b);
+            },
             else => {
                 // Leaf node or unhandled - stop recursing
             },
@@ -1883,6 +2125,21 @@ pub const Analyzer = struct {
                     if (!after_state.is_live) {
                         const name_copy = try self.gpa.dupe(u8, name);
                         try self.errdefer_deinits.put(name_copy, {});
+                    }
+                }
+            }
+        }
+    }
+
+    fn recordDeferredDeinits(self: *Analyzer, before: std.StringHashMap(VarState)) !void {
+        var iter = before.iterator();
+        while (iter.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (entry.value_ptr.is_live) {
+                if (self.variables.get(name)) |after_state| {
+                    if (!after_state.is_live) {
+                        const name_copy = try self.gpa.dupe(u8, name);
+                        try self.deferred_deinits.put(name_copy, {});
                     }
                 }
             }
@@ -1913,13 +2170,9 @@ pub const Analyzer = struct {
                         }
                     },
                     .call, .call_comma => {
-                        const extra = ast.extra_data[@intFromEnum(data.node_and_extra[1])..];
-                        if (extra.len > 0) {
-                            const arg_count = extra[0];
-                            const end = @min(extra.len, 1 + arg_count);
-                            for (extra[1..end]) |arg_idx| {
-                                try self.markReadsInExpr(file_path, ast, @enumFromInt(arg_idx));
-                            }
+                        const call_info = ast.callFull(node);
+                        for (call_info.ast.params) |arg| {
+                            try self.markReadsInExpr(file_path, ast, arg);
                         }
                     },
                     else => {},
@@ -1993,6 +2246,135 @@ pub const Analyzer = struct {
                 try self.markReadsInExpr(file_path, ast, data.node_and_node[0]);
                 try self.markReadsInExpr(file_path, ast, data.node_and_node[1]);
             },
+            .@"while" => {
+                const while_info = ast.whileFull(node);
+                try self.markReadsInExpr(file_path, ast, while_info.ast.cond_expr);
+                if (while_info.ast.cont_expr.unwrap()) |cont| {
+                    try self.markReadsInExpr(file_path, ast, cont);
+                }
+                try self.markReadsInExpr(file_path, ast, while_info.ast.then_expr);
+                if (while_info.ast.else_expr.unwrap()) |else_body| {
+                    try self.markReadsInExpr(file_path, ast, else_body);
+                }
+            },
+            .@"switch", .switch_comma => {
+                const switch_info = ast.switchFull(node);
+                try self.markReadsInExpr(file_path, ast, switch_info.ast.condition);
+                for (switch_info.ast.cases) |case| {
+                    try self.markReadsInExpr(file_path, ast, case);
+                }
+            },
+            .switch_case_one, .switch_case_inline_one => {
+                const case_info = ast.switchCaseOne(node);
+                for (case_info.ast.values) |val| {
+                    try self.markReadsInExpr(file_path, ast, val);
+                }
+                try self.markReadsInExpr(file_path, ast, case_info.ast.target_expr);
+            },
+            .switch_case, .switch_case_inline => {
+                const case_info = ast.switchCase(node);
+                for (case_info.ast.values) |val| {
+                    try self.markReadsInExpr(file_path, ast, val);
+                }
+                try self.markReadsInExpr(file_path, ast, case_info.ast.target_expr);
+            },
+            .for_simple => {
+                const for_info = ast.forSimple(node);
+                for (for_info.ast.inputs) |input| {
+                    try self.markReadsInExpr(file_path, ast, input);
+                }
+                try self.markReadsInExpr(file_path, ast, for_info.ast.then_expr);
+            },
+            .@"for" => {
+                const for_info = ast.forFull(node);
+                for (for_info.ast.inputs) |input| {
+                    try self.markReadsInExpr(file_path, ast, input);
+                }
+                try self.markReadsInExpr(file_path, ast, for_info.ast.then_expr);
+                if (for_info.ast.else_expr.unwrap()) |else_body| {
+                    try self.markReadsInExpr(file_path, ast, else_body);
+                }
+            },
+            .for_range => {
+                const data = ast.nodes.items(.data)[@intFromEnum(node)];
+                try self.markReadsInExpr(file_path, ast, data.node_and_opt_node[0]);
+                if (data.node_and_opt_node[1].unwrap()) |end| {
+                    try self.markReadsInExpr(file_path, ast, end);
+                }
+            },
+            .@"defer" => {
+                const data = ast.nodes.items(.data)[@intFromEnum(node)];
+                try self.markReadsInExpr(file_path, ast, data.node);
+            },
+            .@"errdefer" => {
+                const data = ast.nodes.items(.data)[@intFromEnum(node)];
+                try self.markReadsInExpr(file_path, ast, data.opt_token_and_node[1]);
+            },
+            .builtin_call, .builtin_call_comma => {
+                const data = ast.nodes.items(.data)[@intFromEnum(node)];
+                const extra = ast.extra_data[@intFromEnum(data.extra_range.start)..@intFromEnum(data.extra_range.end)];
+                for (extra) |n| try self.markReadsInExpr(file_path, ast, @enumFromInt(n));
+            },
+            .builtin_call_two, .builtin_call_two_comma => {
+                const data = ast.nodes.items(.data)[@intFromEnum(node)];
+                if (data.opt_node_and_opt_node[0].unwrap()) |a| try self.markReadsInExpr(file_path, ast, a);
+                if (data.opt_node_and_opt_node[1].unwrap()) |b| try self.markReadsInExpr(file_path, ast, b);
+            },
+            else => {
+                const tag_name = @tagName(tag);
+                if (std.mem.eql(u8, tag_name, "nosuspend") or std.mem.eql(u8, tag_name, "resume")) {
+                    const data = ast.nodes.items(.data)[@intFromEnum(node)];
+                    try self.checkAsyncBoundaryExpr(file_path, ast, data.node);
+                    try self.markReadsInExpr(file_path, ast, data.node);
+                }
+            },
+        }
+    }
+
+    fn checkAsyncBoundaryExpr(self: *Analyzer, file_path: []const u8, ast: *const std.zig.Ast, node: zig.Ast.Node.Index) AnalyzeError!void {
+        const tag = ast.nodes.items(.tag)[@intFromEnum(node)];
+        if (tag == .identifier) {
+            if (getVarName(ast, node)) |name| {
+                if (self.variables.get(name)) |var_state| {
+                    if (var_state.origin == .Borrow or var_state.origin == .RawFromBox) {
+                        const token_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(node)]);
+                        try self.addDiagnostic(file_path, .UseAfterFree, "borrowed pointer crosses async boundary; may dangle when async frame suspends", @intCast(token_loc.line), @intCast(token_loc.column));
+                    }
+                }
+            }
+            return;
+        }
+
+        const data = ast.nodes.items(.data)[@intFromEnum(node)];
+        switch (tag) {
+            .call, .call_comma, .call_one, .call_one_comma => {
+                try self.checkAsyncBoundaryExpr(file_path, ast, getCallee(ast, node));
+                switch (tag) {
+                    .call_one, .call_one_comma => {
+                        if (data.node_and_opt_node[1].unwrap()) |arg| {
+                            try self.checkAsyncBoundaryExpr(file_path, ast, arg);
+                        }
+                    },
+                    .call, .call_comma => {
+                        const call_info = ast.callFull(node);
+                        for (call_info.ast.params) |arg| {
+                            try self.checkAsyncBoundaryExpr(file_path, ast, arg);
+                        }
+                    },
+                    else => {},
+                }
+            },
+            .field_access => try self.checkAsyncBoundaryExpr(file_path, ast, data.node_and_token[0]),
+            .deref => try self.checkAsyncBoundaryExpr(file_path, ast, data.node),
+            .address_of => try self.checkAsyncBoundaryExpr(file_path, ast, data.node),
+            .add, .add_wrap, .sub, .sub_wrap, .mul, .mul_wrap, .div, .mod,
+            .shl, .shl_sat, .shr, .bit_and, .bit_or, .bit_xor,
+            .bool_and, .bool_or, .equal_equal, .bang_equal, .less_than, .less_or_equal, .greater_than, .greater_or_equal,
+            .array_cat, .merge_error_sets => {
+                try self.checkAsyncBoundaryExpr(file_path, ast, data.node_and_node[0]);
+                try self.checkAsyncBoundaryExpr(file_path, ast, data.node_and_node[1]);
+            },
+            .assign => try self.checkAsyncBoundaryExpr(file_path, ast, data.node_and_node[1]),
             else => {},
         }
     }
@@ -2149,6 +2531,10 @@ fn getVarName(ast: *const std.zig.Ast, node: zig.Ast.Node.Index) ?[]const u8 {
     const tag = ast.nodes.items(.tag)[@intFromEnum(node)];
     if (tag == .identifier) {
         const main_token = ast.nodes.items(.main_token)[@intFromEnum(node)];
+        // Defensive: skip tokens with invalid positions to avoid tokenizer crash
+        if (main_token >= ast.tokens.len) return null;
+        const token_start = ast.tokenStart(main_token);
+        if (token_start >= ast.source.len) return null;
         return ast.tokenSlice(main_token);
     }
     return null;
@@ -2165,10 +2551,9 @@ fn getCallArg(ast: *const std.zig.Ast, call_node: zig.Ast.Node.Index, arg_index:
             }
         },
         .call, .call_comma => {
-            const extra = ast.extra_data[@intFromEnum(data.node_and_extra[1])..];
-            const arg_count = extra[0];
-            if (arg_index < arg_count) {
-                return @enumFromInt(extra[1 + arg_index]);
+            const call_info = ast.callFull(call_node);
+            if (arg_index < call_info.ast.params.len) {
+                return call_info.ast.params[arg_index];
             }
         },
         else => {},

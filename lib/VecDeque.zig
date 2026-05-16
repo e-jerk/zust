@@ -28,6 +28,11 @@ pub fn VecDeque(comptime T: type) type {
             };
         }
 
+        /// Create an empty deque (same as `init`).
+        pub fn initDefault(allocator: std.mem.Allocator) !Self {
+            return init(allocator);
+        }
+
         pub fn deinit(self: *Self) void {
             // Deinit all owned boxes
             var i: usize = 0;
@@ -345,4 +350,10 @@ test "VecDeque makeContiguous" {
     try std.testing.expectEqual(slice[0].ptr.*, 20);
     try std.testing.expectEqual(slice[1].ptr.*, 30);
     try std.testing.expectEqual(slice[2].ptr.*, 10);
+}
+
+test "VecDeque initDefault" {
+    var dq = try VecDeque(u32).initDefault(std.testing.allocator);
+    defer dq.deinit();
+    try std.testing.expect(dq.isEmpty());
 }

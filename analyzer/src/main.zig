@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const safe = @import("safe");
 const String = safe.String;
 const Analysis = @import("Analysis.zig");
@@ -7,6 +8,7 @@ const Provenance = @import("Provenance.zig");
 const LSP = @import("LSP.zig");
 const JSONRPC = @import("JSONRPC.zig");
 const Contract = @import("Contract.zig");
+const Cache = @import("Cache.zig").Cache;
 
 // Dog-foods zust: imports safe types for use in tests and runtime.
 // safe.String is used below for JSON-RPC message building in LSP tests.
@@ -15,6 +17,21 @@ const OutputFormat = enum { Human, SARIF };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
+
+    if (comptime builtin.target.os.tag == .wasi) {
+        // WASI: no command-line args available, run LSP server directly.
+        var server = try LSP.Server.init(allocator);
+        defer server.deinit();
+
+        const io = init.io;
+        var stdin_buf: [4096]u8 = undefined;
+        var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
+        var stdout_buf: [4096]u8 = undefined;
+        var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+
+        try server.run(&stdin_reader, &stdout_writer);
+        return;
+    }
 
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     _ = args_iter.skip(); // skip program name
@@ -79,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
                 strictness = .High;
             }
         } else if (!std.mem.startsWith(u8, arg_slice, "-")) {
+            if (target_path) |p| allocator.free(p);
             target_path = try allocator.dupe(u8, arg_slice);
         }
     }
@@ -86,13 +104,16 @@ pub fn main(init: std.process.Init) !void {
     if (help_mode or target_path == null) {
         std.debug.print(
             \\Usage: zust-analyze <path> [options]
-            \\
+            \\\
+
             \\Analyze a Zig source file or directory for memory safety issues.
-            \\
+            \\\
+
             \\Arguments:
             \\  <file.zig>          Analyze a single file
             \\  <directory>         Recursively analyze all .zig files in directory
-            \\
+            \\\
+
             \\Options:
             \\  --lsp               Run as LSP language server
             \\  --sarif             Output in SARIF 2.1.0 format
@@ -101,7 +122,8 @@ pub fn main(init: std.process.Init) !void {
             \\  --strictness=medium Medium strictness (default)
             \\  --strictness=high   High strictness (may have false positives)
             \\  --help              Show this help message
-            \\
+            \\\
+
         , .{});
         if (help_mode) return;
         return error.InvalidUsage;
@@ -240,10 +262,12 @@ fn analyzeDirectory(
         };
     }
 
+    var cache = Cache.init(allocator);
+    defer cache.deinit();
     var analyzer = Analysis.Analyzer.init(allocator);
     defer analyzer.deinit();
 
-    try analyzer.analyzeWorkspace(workspace_files, strictness);
+    try analyzer.analyzeWorkspaceCached(workspace_files, strictness, &cache);
 
     switch (output_format) {
         .Human => {
@@ -265,6 +289,8 @@ fn analyzeDirectory(
             std.debug.print("{s}\n", .{buf[0..writer.end]});
         },
     }
+
+    std.debug.print("{}\n", .{cache.stats});
 
     var has_errors = false;
     for (analyzer.diagnostics.items) |diag| {
@@ -454,6 +480,65 @@ test "LSP server publish diagnostics on didOpen" {
     }
     try std.testing.expect(std.mem.indexOf(u8, response, "textDocument/publishDiagnostics") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "DoubleFree") != null);
+}
+
+test "LSP incremental sync applies range changes and republishes diagnostics" {
+    const gpa = std.testing.allocator;
+
+    var server = try LSP.Server.init(gpa);
+    defer server.deinit();
+
+    // Open a clean document
+    const initial_source = "fn main() void { _ = 0; }";
+    const open_body = "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file:///test.zig\",\"version\":1,\"text\":\"" ++ initial_source ++ "\"}}}";
+    var open_str = String.init(gpa);
+    defer open_str.deinit();
+    try open_str.appendFmt("Content-Length: {d}\r\n\r\n", .{open_body.len});
+    try open_str.append(open_body);
+    const open_request = open_str.slice();
+
+    var open_reader = std.Io.Reader.fixed(open_request);
+    var open_output_buf: [4096]u8 = undefined;
+    var open_output_writer = std.Io.Writer.fixed(&open_output_buf);
+    server.notification_writer = &open_output_writer;
+
+    var open_msg = (try JSONRPC.readMessage(gpa, &open_reader)).?;
+    defer open_msg.deinit(gpa);
+    try server.handleMessage(open_msg, &open_output_writer);
+
+    // Verify initial open published diagnostics
+    const open_response = open_output_buf[0..open_output_writer.end];
+    try std.testing.expect(std.mem.indexOf(u8, open_response, "textDocument/publishDiagnostics") != null);
+
+    // Now send an incremental change that introduces a Box leak
+    const change_text = "const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable";
+    const change_body = "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"file:///test.zig\",\"version\":2},\"contentChanges\":[{\"range\":{\"start\":{\"line\":0,\"character\":17},\"end\":{\"line\":0,\"character\":23}},\"text\":\"" ++ change_text ++ "\"}]}}";
+    var change_str = String.init(gpa);
+    defer change_str.deinit();
+    try change_str.appendFmt("Content-Length: {d}\r\n\r\n", .{change_body.len});
+    try change_str.append(change_body);
+    const change_request = change_str.slice();
+
+    var change_reader = std.Io.Reader.fixed(change_request);
+    var change_output_buf: [4096]u8 = undefined;
+    var change_output_writer = std.Io.Writer.fixed(&change_output_buf);
+    server.notification_writer = &change_output_writer;
+
+    var change_msg = (try JSONRPC.readMessage(gpa, &change_reader)).?;
+    defer change_msg.deinit(gpa);
+    try server.handleMessage(change_msg, &change_output_writer);
+
+    // Verify the document was updated
+    const doc_source = server.getDocumentSource("file:///test.zig") orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(std.mem.indexOf(u8, doc_source, change_text) != null);
+    try std.testing.expect(std.mem.indexOf(u8, doc_source, "_ = 0;") == null);
+
+    // Verify diagnostics were republished after the incremental change
+    const change_response = change_output_buf[0..change_output_writer.end];
+    try std.testing.expect(std.mem.indexOf(u8, change_response, "textDocument/publishDiagnostics") != null);
 }
 
 test "analyzer self-check on LSP source" {
@@ -1274,6 +1359,105 @@ test "analyzer detects division by zero" {
     try std.testing.expect(analyzer.hasDiagnostic(.DivisionByZero));
 }
 
+test "LSP workspace/symbol returns matching symbols" {
+    const gpa = std.testing.allocator;
+
+    var server = try LSP.Server.init(gpa);
+    defer server.deinit();
+
+    const source = "fn fooFunc() void {} const FooStruct = struct {}; const bar_var = 42;";
+
+    // Open document
+    const open_body = "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file:///test.zig\",\"version\":1,\"text\":\"" ++ source ++ "\"}}}";
+    var open_str = String.init(gpa);
+    defer open_str.deinit();
+    try open_str.appendFmt("Content-Length: {d}\r\n\r\n", .{open_body.len});
+    try open_str.append(open_body);
+    const open_request = open_str.slice();
+
+    var open_reader = std.Io.Reader.fixed(open_request);
+    var open_output_buf: [4096]u8 = undefined;
+    var open_output_writer = std.Io.Writer.fixed(&open_output_buf);
+    server.notification_writer = &open_output_writer;
+
+    var open_msg = (try JSONRPC.readMessage(gpa, &open_reader)).?;
+    defer open_msg.deinit(gpa);
+    try server.handleMessage(open_msg, &open_output_writer);
+
+    // Send workspace/symbol request
+    const symbol_body = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"workspace/symbol\",\"params\":{\"query\":\"foo\"}}";
+    var symbol_str = String.init(gpa);
+    defer symbol_str.deinit();
+    try symbol_str.appendFmt("Content-Length: {d}\r\n\r\n", .{symbol_body.len});
+    try symbol_str.append(symbol_body);
+    const symbol_request = symbol_str.slice();
+
+    var symbol_reader = std.Io.Reader.fixed(symbol_request);
+    var symbol_output_buf: [4096]u8 = undefined;
+    var symbol_output_writer = std.Io.Writer.fixed(&symbol_output_buf);
+
+    var symbol_msg = (try JSONRPC.readMessage(gpa, &symbol_reader)).?;
+    defer symbol_msg.deinit(gpa);
+    try server.handleMessage(symbol_msg, &symbol_output_writer);
+
+    const response = symbol_output_buf[0..symbol_output_writer.end];
+    try std.testing.expect(std.mem.indexOf(u8, response, "fooFunc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "FooStruct") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "bar_var") == null);
+}
+
+test "LSP references finds all usages" {
+    const gpa = std.testing.allocator;
+
+    var server = try LSP.Server.init(gpa);
+    defer server.deinit();
+
+    const source = "fn main() void { const my_var = 42; _ = my_var; const x = my_var + 1; }";
+
+    // Open document
+    const open_body = "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file:///test.zig\",\"version\":1,\"text\":\"" ++ source ++ "\"}}}";
+    var open_str = String.init(gpa);
+    defer open_str.deinit();
+    try open_str.appendFmt("Content-Length: {d}\r\n\r\n", .{open_body.len});
+    try open_str.append(open_body);
+    const open_request = open_str.slice();
+
+    var open_reader = std.Io.Reader.fixed(open_request);
+    var open_output_buf: [4096]u8 = undefined;
+    var open_output_writer = std.Io.Writer.fixed(&open_output_buf);
+    server.notification_writer = &open_output_writer;
+
+    var open_msg = (try JSONRPC.readMessage(gpa, &open_reader)).?;
+    defer open_msg.deinit(gpa);
+    try server.handleMessage(open_msg, &open_output_writer);
+
+    // Send textDocument/references request for my_var
+    const ref_body = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/references\",\"params\":{\"textDocument\":{\"uri\":\"file:///test.zig\"},\"position\":{\"line\":0,\"character\":25},\"context\":{\"includeDeclaration\":true}}}";
+    var ref_str = String.init(gpa);
+    defer ref_str.deinit();
+    try ref_str.appendFmt("Content-Length: {d}\r\n\r\n", .{ref_body.len});
+    try ref_str.append(ref_body);
+    const ref_request = ref_str.slice();
+
+    var ref_reader = std.Io.Reader.fixed(ref_request);
+    var ref_output_buf: [4096]u8 = undefined;
+    var ref_output_writer = std.Io.Writer.fixed(&ref_output_buf);
+
+    var ref_msg = (try JSONRPC.readMessage(gpa, &ref_reader)).?;
+    defer ref_msg.deinit(gpa);
+    try server.handleMessage(ref_msg, &ref_output_writer);
+
+    const response = ref_output_buf[0..ref_output_writer.end];
+    // Should find 3 occurrences: declaration + 2 usages
+    var count: usize = 0;
+    var search_start: usize = 0;
+    while (std.mem.indexOfPos(u8, response, search_start, "\"start\"")) |pos| {
+        count += 1;
+        search_start = pos + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+}
+
 test "analyzer detects shift overflow" {
     const source =
         \\fn testShiftOverflow() void {
@@ -1328,4 +1512,176 @@ test "analyzer detects unchecked index" {
     defer analyzer.deinit();
     try analyzer.analyzeFile("test.zig", source, .Medium);
     try std.testing.expect(analyzer.hasDiagnostic(.UncheckedIndex));
+}
+
+// === Async Safety Tests ===
+
+test "analyzer detects async function via callconv" {
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const source =
+        \\fn foo() callconv(.Async) void {}
+    ;
+
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    if (analyzer.functions.get("foo")) |fn_info| {
+        try std.testing.expect(fn_info.is_async);
+    } else {
+        try std.testing.expect(false); // Function should be in registry
+    }
+}
+
+test "analyzer detects borrow across nosuspend boundary" {
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const source =
+        \\fn asyncFn(x: *const u32) callconv(.Async) void { _ = x; }
+        \\
+        \\fn caller() void {
+        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const b = box.borrowImm();
+        \\    nosuspend asyncFn(b);
+        \\}
+    ;
+
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+
+    var found = false;
+    for (analyzer.diagnostics.items) |diag| {
+        if (std.mem.indexOf(u8, diag.message, "borrowed pointer crosses async boundary") != null) {
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "analyzer detects use-after-move passing to async function" {
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const source =
+        \\fn asyncFn(x: Box(u32, 0, 0, 0)) callconv(.Async) void {
+        \\    const dead = x.deinit();
+        \\    _ = dead;
+        \\}
+        \\
+        \\fn caller() void {
+        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    asyncFn(box);
+        \\    const dead = box.deinit();
+        \\    _ = dead;
+        \\}
+    ;
+
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+
+    var found = false;
+    for (analyzer.diagnostics.items) |diag| {
+        if (diag.kind == .UseAfterMove and std.mem.indexOf(u8, diag.message, "async") != null) {
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+// === Cache Tests ===
+
+test "cache reuses AST for unchanged content" {
+    const gpa = std.testing.allocator;
+
+    var cache = Cache.init(gpa);
+    defer cache.deinit();
+
+    const source = "fn main() void { _ = 0; }";
+
+    const ast1 = try cache.getAst("test.zig", source);
+    try std.testing.expectEqual(@as(u64, 0), cache.stats.ast_hits);
+    try std.testing.expectEqual(@as(u64, 1), cache.stats.ast_misses);
+
+    const ast2 = try cache.getAst("test.zig", source);
+    try std.testing.expectEqual(@as(u64, 1), cache.stats.ast_hits);
+    try std.testing.expectEqual(@as(u64, 1), cache.stats.ast_misses);
+
+    // Should return the same cached AST pointer
+    try std.testing.expectEqual(ast1, ast2);
+}
+
+test "cache invalidates on content change" {
+    const gpa = std.testing.allocator;
+
+    var cache = Cache.init(gpa);
+    defer cache.deinit();
+
+    const source1 = "fn main() void { _ = 0; }";
+    const source2 = "fn main() void { _ = 1; }";
+
+    _ = try cache.getAst("test.zig", source1);
+    try std.testing.expectEqual(@as(u64, 1), cache.stats.ast_misses);
+
+    // Invalidate before changing content
+    try cache.invalidate("test.zig");
+
+    _ = try cache.getAst("test.zig", source2);
+    try std.testing.expectEqual(@as(u64, 2), cache.stats.ast_misses);
+
+    // Note: we do not compare pointers here because the allocator may reuse
+    // the same address after the old AST was freed. The stats above prove
+    // that a new parse actually happened.
+}
+
+test "cache analysis reuses results for unchanged content" {
+    const gpa = std.testing.allocator;
+
+    var cache = Cache.init(gpa);
+    defer cache.deinit();
+    var analyzer = Analysis.Analyzer.init(gpa);
+    defer analyzer.deinit();
+
+    const source =
+        \\fn testDoubleFree() void {
+        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const dead = box.deinit();
+        \\    const dead2 = dead.deinit();
+        \\    _ = dead2;
+        \\}
+    ;
+
+    var result1 = try cache.getAnalysis("test.zig", source, &analyzer, .Medium);
+    defer result1.deinit();
+    try std.testing.expectEqual(@as(u64, 1), cache.stats.analysis_misses);
+    try std.testing.expect(result1.diagnostics.items.len > 0);
+
+    // Second call with same source should hit the cache
+    var result2 = try cache.getAnalysis("test.zig", source, &analyzer, .Medium);
+    defer result2.deinit();
+    try std.testing.expectEqual(@as(u64, 1), cache.stats.analysis_hits);
+    try std.testing.expectEqual(@as(u64, 1), cache.stats.analysis_misses);
+
+    // Results should be equivalent
+    try std.testing.expectEqual(result1.diagnostics.items.len, result2.diagnostics.items.len);
+}
+
+test "cache analysis invalidates on content change" {
+    const gpa = std.testing.allocator;
+
+    var cache = Cache.init(gpa);
+    defer cache.deinit();
+    var analyzer = Analysis.Analyzer.init(gpa);
+    defer analyzer.deinit();
+
+    const source1 = "fn main() void { _ = 0; }";
+    const source2 = "fn main() void { _ = 1; }";
+
+    var result1 = try cache.getAnalysis("test.zig", source1, &analyzer, .Medium);
+    defer result1.deinit();
+    try std.testing.expectEqual(@as(u64, 1), cache.stats.analysis_misses);
+
+    try cache.invalidate("test.zig");
+
+    var result2 = try cache.getAnalysis("test.zig", source2, &analyzer, .Medium);
+    defer result2.deinit();
+    try std.testing.expectEqual(@as(u64, 2), cache.stats.analysis_misses);
+    try std.testing.expectEqual(@as(u64, 0), cache.stats.analysis_hits);
 }

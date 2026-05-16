@@ -45,6 +45,22 @@ pub fn CheckedInt(comptime T: type) type {
             return self.value;
         }
 
+        pub fn fromInt(value: anytype) error{Overflow}!Self {
+            const T2 = @TypeOf(value);
+            if (@typeInfo(T2) != .int) @compileError("CheckedInt.fromInt requires an integer argument");
+
+            if (@typeInfo(T2).int.bits > @typeInfo(T).int.bits or
+                (@typeInfo(T2).int.signedness == .signed and @typeInfo(T).int.signedness == .unsigned))
+            {
+                if (value > std.math.maxInt(T)) return error.Overflow;
+                if (@typeInfo(T).int.signedness == .signed and @typeInfo(T2).int.signedness == .signed) {
+                    if (value < std.math.minInt(T)) return error.Overflow;
+                }
+            }
+
+            return init(@intCast(value));
+        }
+
         pub fn eq(self: Self, other: Self) bool {
             return self.value == other.value;
         }

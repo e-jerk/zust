@@ -1,4 +1,5 @@
 const std = @import("std");
+const Default = @import("Default.zig").Default;
 
 /// Single-threaded interior mutability via copying.
 /// Similar to Rust's `std::cell::Cell<T>`.
@@ -14,6 +15,11 @@ pub fn Cell(comptime T: type) type {
 
         pub fn init(value: T) Self {
             return .{ .value = value };
+        }
+
+        /// Create a Cell holding the default value for `T`.
+        pub fn initDefault() Self {
+            return init(Default(T));
         }
 
         /// Returns a copy of the value.
@@ -160,4 +166,11 @@ fn assertIsCopy(comptime T: type) void {
     if (!ok) {
         @compileError("Cell requires Copy type, got: " ++ @typeName(T));
     }
+}
+
+// ─── Tests ───
+
+test "Cell initDefault" {
+    var cell = Cell(u32).initDefault();
+    try std.testing.expectEqual(cell.get(), 0);
 }

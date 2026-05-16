@@ -99,6 +99,18 @@ pub const Transpiler = struct {
                 .@"defer" => {
                     try self.handleDefer(node);
                 },
+                .builtin_call => {
+                    try self.handleBuiltinCall(node);
+                },
+                .builtin_call_two => {
+                    try self.handleBuiltinCallTwo(node);
+                },
+                .for_simple, .@"for" => {
+                    try self.handleFor(node);
+                },
+                .while_simple, .while_cont, .@"while" => {
+                    try self.handleWhile(node);
+                },
                 else => {},
             }
         }
@@ -203,6 +215,56 @@ pub const Transpiler = struct {
                 try self.addEdit(call_span.start, call_span.end, repl);
             }
         }
+
+        // Pattern: std.mem.eql → safe.SimdUtils.eql
+        if (std.mem.eql(u8, fn_text, "std.mem.eql") or std.mem.eql(u8, fn_text, "mem.eql")) {
+            const call_span = ast.nodeToSpan(node);
+            const repl = try std.fmt.allocPrint(self.allocator, "safe.SimdUtils.eql", .{});
+            try self.addEdit(call_span.start, call_span.end, repl);
+        }
+
+        // Pattern: std.mem.copy → safe.SimdUtils.copy
+        if (std.mem.eql(u8, fn_text, "std.mem.copy") or std.mem.eql(u8, fn_text, "mem.copy")) {
+            const call_span = ast.nodeToSpan(node);
+            const repl = try std.fmt.allocPrint(self.allocator, "safe.SimdUtils.copy", .{});
+            try self.addEdit(call_span.start, call_span.end, repl);
+        }
+
+        // Pattern: std.mem.indexOf → comment
+        if (std.mem.eql(u8, fn_text, "std.mem.indexOf") or std.mem.eql(u8, fn_text, "mem.indexOf")) {
+            const call_span = ast.nodeToSpan(node);
+            var line_start = call_span.start;
+            while (line_start > 0 and source[line_start - 1] != '\n') {
+                line_start -= 1;
+            }
+            const repl = try std.fmt.allocPrint(self.allocator, "// zust: use safe.String or safe.GuardedSlice for slice operations\n", .{});
+            try self.addEdit(line_start, line_start, repl);
+        }
+
+        // Pattern: std.debug.print with raw pointers → redacted
+        if (std.mem.eql(u8, fn_text, "std.debug.print") or std.mem.eql(u8, fn_text, "debug.print")) {
+            var has_pointer = false;
+            for (call.ast.params) |param| {
+                const param_span = ast.nodeToSpan(param);
+                const param_text = source[param_span.start..param_span.end];
+                if (std.mem.indexOf(u8, param_text, "*") orelse std.mem.indexOf(u8, param_text, "&")) |_| {
+                    has_pointer = true;
+                    break;
+                }
+            }
+            if (has_pointer) {
+                const call_span = ast.nodeToSpan(node);
+                const repl = try std.fmt.allocPrint(self.allocator, "// zust: never print raw pointer addresses\n    std.debug.print(\"hidden\\n\", .{{}})", .{});
+                try self.addEdit(call_span.start, call_span.end, repl);
+            }
+        }
+
+        // Pattern: allocator.free(slice)  →  no-op (safe types own their memory)
+        if (std.mem.eql(u8, fn_text, "free") or std.mem.endsWith(u8, fn_text, ".free")) {
+            const call_span = ast.nodeToSpan(node);
+            const repl = try std.fmt.allocPrint(self.allocator, "// safe-transpile: free removed (memory owned by safe type)", .{});
+            try self.addEdit(call_span.start, call_span.end, repl);
+        }
     }
 
     /// Handle field access patterns (pattern 4: std.Thread.Mutex)
@@ -216,19 +278,38 @@ pub const Transpiler = struct {
             const repl = try std.fmt.allocPrint(self.allocator, "safe.Mutex(void)", .{});
             try self.addEdit(span.start, span.end, repl);
         }
+
+        // Pattern: std.heap.page_allocator → safe.Pool
+        if (std.mem.eql(u8, text, "std.heap.page_allocator")) {
+            const repl = try std.fmt.allocPrint(self.allocator, "safe.Pool", .{});
+            try self.addEdit(span.start, span.end, repl);
+        }
+
+        // Pattern: std.heap.raw_c_allocator → safe.Pool
+        if (std.mem.eql(u8, text, "std.heap.raw_c_allocator")) {
+            const repl = try std.fmt.allocPrint(self.allocator, "safe.Pool", .{});
+            try self.addEdit(span.start, span.end, repl);
+        }
     }
 
-    /// Handle variable declarations (pattern 6: uninitialized var)
+    /// Handle variable declarations (pattern 6: uninitialized var + slice types)
     fn handleVarDecl(self: *Self, node: std.zig.Ast.Node.Index) !void {
         const ast = &self.ast.?;
         const source = self.source.slice();
         const vd = ast.fullVarDecl(node) orelse return;
-        if (vd.ast.init_node == .none) {
-            if (vd.ast.type_node != .none) {
-                const type_node: std.zig.Ast.Node.Index = vd.ast.type_node.unwrap().?;
-                const type_span = ast.nodeToSpan(type_node);
-                const type_text = source[type_span.start..type_span.end];
 
+        // Rewrite []u8 and []const u8 type annotations to safe.Slice(u8)
+        if (vd.ast.type_node != .none) {
+            const type_node: std.zig.Ast.Node.Index = vd.ast.type_node.unwrap().?;
+            const type_span = ast.nodeToSpan(type_node);
+            const type_text = source[type_span.start..type_span.end];
+
+            if (std.mem.eql(u8, type_text, "[]u8") or std.mem.eql(u8, type_text, "[]const u8")) {
+                const repl = try std.fmt.allocPrint(self.allocator, "safe.Slice(u8)", .{});
+                try self.addEdit(type_span.start, type_span.end, repl);
+            }
+
+            if (vd.ast.init_node == .none) {
                 const after_type = type_span.end;
                 if (isIntType(type_text)) {
                     const repl = try std.fmt.allocPrint(self.allocator, " = safe.CheckedInt({s}).init(0)", .{type_text});
@@ -237,6 +318,88 @@ pub const Transpiler = struct {
                     const repl = try std.fmt.allocPrint(self.allocator, " = undefined", .{});
                     try self.addEdit(after_type, after_type, repl);
                 }
+            }
+        }
+
+        // Pattern: const/var ptr = &local_variable → safe.OffsetPtr (only if used later)
+        if (vd.ast.init_node != .none) {
+            const init_node: std.zig.Ast.Node.Index = vd.ast.init_node.unwrap().?;
+            if (ast.nodeTag(init_node) == .address_of) {
+                const inner = ast.nodeData(init_node).node;
+                if (ast.nodeTag(inner) == .identifier) {
+                    const decl_span = ast.nodeToSpan(node);
+                    const main_token = ast.nodeMainToken(node);
+                    const ptr_name = ast.tokenSlice(main_token + 1);
+                    const inner_name = ast.tokenSlice(ast.nodeMainToken(inner));
+
+                    if (self.isPointerUsedLater(ptr_name, decl_span.end)) {
+                        const repl = try std.fmt.allocPrint(self.allocator,
+                            "var {s} = try safe.OffsetPtr.init(allocator, &{s}); defer {s}.deinit()",
+                            .{ ptr_name, inner_name, ptr_name });
+                        try self.addEdit(decl_span.start, decl_span.end, repl);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle for loops with index access (warning comment)
+    fn handleFor(self: *Self, node: std.zig.Ast.Node.Index) !void {
+        const ast = &self.ast.?;
+        const tag = ast.nodeTag(node);
+        if (tag == .@"for") {
+            const for_info = ast.forFull(node);
+            if (for_info.ast.inputs.len >= 2) {
+                const span = ast.nodeToSpan(node);
+                const repl = try std.fmt.allocPrint(self.allocator, "// safe-transpile: for with index access requires manual review\n    ", .{});
+                try self.addEdit(span.start, span.start, repl);
+            }
+        }
+    }
+
+    /// Handle while loops with infinite condition (pattern: iteration limit)
+    fn handleWhile(self: *Self, node: std.zig.Ast.Node.Index) !void {
+        const ast = &self.ast.?;
+        const source = self.source.slice();
+        const tag = ast.nodeTag(node);
+
+        var cond_expr: std.zig.Ast.Node.Index = undefined;
+        var body_expr: std.zig.Ast.Node.Index = undefined;
+
+        if (tag == .while_simple or tag == .while_cont) {
+            const data = ast.nodeData(node).node_and_node;
+            cond_expr = data[0];
+            body_expr = data[1];
+        } else if (tag == .@"while") {
+            const while_info = ast.whileFull(node);
+            cond_expr = while_info.ast.cond_expr;
+            body_expr = while_info.ast.then_expr;
+        } else {
+            return;
+        }
+
+        // Check if condition is `true`
+        if (ast.nodeTag(cond_expr) != .identifier) return;
+        const cond_token = ast.nodeMainToken(cond_expr);
+        const cond_text = ast.tokenSlice(cond_token);
+        if (!std.mem.eql(u8, cond_text, "true")) return;
+
+        const while_token = ast.nodeMainToken(node);
+        const while_pos = ast.tokens.items(.start)[while_token];
+
+        // Insert counter declaration before while
+        const decl_repl = try std.fmt.allocPrint(self.allocator, "var __zust_loop_counter: u64 = 0;\n    ", .{});
+        try self.addEdit(while_pos, while_pos, decl_repl);
+
+        // Insert guard inside body if it's a block
+        const body_tag = ast.nodeTag(body_expr);
+        const is_block = std.mem.startsWith(u8, @tagName(body_tag), "block");
+        if (is_block) {
+            const lbrace_token = ast.nodeMainToken(body_expr);
+            const lbrace_pos = ast.tokens.items(.start)[lbrace_token];
+            if (lbrace_pos < source.len and source[lbrace_pos] == '{') {
+                const guard_repl = try std.fmt.allocPrint(self.allocator, "\n        __zust_loop_counter += 1;\n        if (__zust_loop_counter > 1_000_000) return error.InfiniteLoop;\n        ", .{});
+                try self.addEdit(lbrace_pos + 1, lbrace_pos + 1, guard_repl);
             }
         }
     }
@@ -296,6 +459,79 @@ pub const Transpiler = struct {
         }
     }
 
+    /// Handle builtin calls that need manual review comments
+    fn handleBuiltinCall(self: *Self, node: std.zig.Ast.Node.Index) !void {
+        const ast = &self.ast.?;
+        const source = self.source.slice();
+        const main_token = ast.nodeMainToken(node);
+        const builtin_name = ast.tokenSlice(main_token);
+        const span = ast.nodeToSpan(node);
+
+        const unsafe_builtins = &[_][]const u8{ "@ptrCast", "@alignCast", "@intToPtr", "@ptrToInt", "@bitCast" };
+        for (unsafe_builtins) |name| {
+            if (std.mem.eql(u8, builtin_name, name)) {
+                const repl = try std.fmt.allocPrint(self.allocator, "// safe-transpile: {s} requires manual review\n    {s}", .{ name, builtin_name });
+                try self.addEdit(span.start, span.end, repl);
+                break;
+            }
+        }
+
+        // @intCast / @truncate one-arg form: suggest CheckedInt wrapper
+        if (std.mem.eql(u8, builtin_name, "@intCast") or std.mem.eql(u8, builtin_name, "@truncate")) {
+            var line_start = span.start;
+            while (line_start > 0 and source[line_start - 1] != '\n') {
+                line_start -= 1;
+            }
+            const repl = try std.fmt.allocPrint(self.allocator, "// safe-transpile: {s} requires manual review — consider safe.CheckedInt(T).init({s})\n", .{ builtin_name, builtin_name });
+            try self.addEdit(line_start, line_start, repl);
+        }
+    }
+
+    /// Handle builtin calls with exactly two positional args
+    fn handleBuiltinCallTwo(self: *Self, node: std.zig.Ast.Node.Index) !void {
+        const ast = &self.ast.?;
+        const source = self.source.slice();
+        const main_token = ast.nodeMainToken(node);
+        const builtin_name = ast.tokenSlice(main_token);
+        const span = ast.nodeToSpan(node);
+
+        // @memcpy(dest, src) → safe.SimdUtils.copy
+        if (std.mem.eql(u8, builtin_name, "@memcpy")) {
+            const repl = try std.fmt.allocPrint(self.allocator, "safe.SimdUtils.copy", .{});
+            try self.addEdit(span.start, span.end, repl);
+            return;
+        }
+
+        // Two-arg @intCast / @truncate → safe.CheckedInt wrapper (only if both args present)
+        if (std.mem.eql(u8, builtin_name, "@intCast") or std.mem.eql(u8, builtin_name, "@truncate")) {
+            const data = ast.nodeData(node).opt_node_and_opt_node;
+            if (data[0] != .none and data[1] != .none) {
+                const t_node = data[0].unwrap().?;
+                const value_node = data[1].unwrap().?;
+                const t_span = ast.nodeToSpan(t_node);
+                const value_span = ast.nodeToSpan(value_node);
+                const t_text = source[t_span.start..t_span.end];
+                const value_text = source[value_span.start..value_span.end];
+                const repl = try std.fmt.allocPrint(self.allocator, "safe.CheckedInt({s}).init({s}({s}, {s}))", .{ t_text, builtin_name, t_text, value_text });
+                try self.addEdit(span.start, span.end, repl);
+                return;
+            }
+            // One-arg form: suggest CheckedInt but keep original
+            var line_start = span.start;
+            while (line_start > 0 and source[line_start - 1] != '\n') {
+                line_start -= 1;
+            }
+            const repl = try std.fmt.allocPrint(self.allocator, "// safe-transpile: {s} requires manual review — consider safe.CheckedInt(T).init({s})\n", .{ builtin_name, builtin_name });
+            try self.addEdit(line_start, line_start, repl);
+            return;
+        }
+
+        if (std.mem.eql(u8, builtin_name, "@bitCast")) {
+            const repl = try std.fmt.allocPrint(self.allocator, "// safe-transpile: {s} requires manual review\n    {s}", .{ builtin_name, builtin_name });
+            try self.addEdit(span.start, span.end, repl);
+        }
+    }
+
     fn applyEdits(self: *Self, source: []const u8, allocator: std.mem.Allocator) ![]const u8 {
         const edits = self.edits.items;
         if (edits.len == 0) {
@@ -331,6 +567,39 @@ pub const Transpiler = struct {
         for (int_types) |t| {
             if (std.mem.eql(u8, type_text, t)) return true;
         }
+        return false;
+    }
+
+    fn isPointerUsedLater(self: *Self, ptr_name: []const u8, after_pos: usize) bool {
+        const source = self.source.slice();
+        if (after_pos >= source.len) return false;
+        const rest = source[after_pos..];
+        if (ptr_name.len + 4 > 64) return false;
+
+        var buf: [64]u8 = undefined;
+
+        // Dereference pattern: ptr.*
+        if (std.fmt.bufPrint(&buf, "{s}.*", .{ptr_name})) |pattern| {
+            if (std.mem.indexOf(u8, rest, pattern)) |_| return true;
+        } else |_| {}
+
+        // Function call argument patterns
+        if (std.fmt.bufPrint(&buf, "({s})", .{ptr_name})) |pattern| {
+            if (std.mem.indexOf(u8, rest, pattern)) |_| return true;
+        } else |_| {}
+
+        if (std.fmt.bufPrint(&buf, ", {s}", .{ptr_name})) |pattern| {
+            if (std.mem.indexOf(u8, rest, pattern)) |_| return true;
+        } else |_| {}
+
+        if (std.fmt.bufPrint(&buf, " {s},", .{ptr_name})) |pattern| {
+            if (std.mem.indexOf(u8, rest, pattern)) |_| return true;
+        } else |_| {}
+
+        if (std.fmt.bufPrint(&buf, " {s})", .{ptr_name})) |pattern| {
+            if (std.mem.indexOf(u8, rest, pattern)) |_| return true;
+        } else |_| {}
+
         return false;
     }
 };
@@ -461,6 +730,25 @@ test "no changes for safe code" {
     try std.testing.expect(std.mem.eql(u8, input, output));
 }
 
+test "pattern: std.heap.page_allocator → safe.Pool" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\const std = @import("std");
+        \\fn foo() void {
+        \\    const alloc = std.heap.page_allocator;
+        \\    _ = alloc;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.Pool"));
+}
+
 test "transpiler dog-food: safe types prevent leaks" {
     const allocator = std.testing.allocator;
     const input =
@@ -478,6 +766,288 @@ test "transpiler dog-food: safe types prevent leaks" {
     defer allocator.free(output);
 
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.CheckedInt(i32).init(0)"));
+}
+
+test "pattern: []u8 type → safe.Slice(u8)" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    var s: []u8 = undefined;
+        \\    _ = s;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.Slice(u8)"));
+}
+
+test "pattern: []const u8 type → safe.Slice(u8)" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    var s: []const u8 = undefined;
+        \\    _ = s;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.Slice(u8)"));
+}
+
+test "pattern: @memcpy → safe.SimdUtils.copy" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    var a = [_]u8{1, 2, 3};
+        \\    var b = [_]u8{0, 0, 0};
+        \\    @memcpy(&b, &a);
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.SimdUtils.copy"));
+}
+
+test "pattern: std.mem.eql → safe.SimdUtils.eql" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\const std = @import("std");
+        \\fn foo() bool {
+        \\    return std.mem.eql(u8, "a", "b");
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.SimdUtils.eql"));
+}
+
+test "pattern: std.mem.copy → safe.SimdUtils.copy" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\const std = @import("std");
+        \\fn foo() void {
+        \\    var a = [_]u8{1, 2, 3};
+        \\    var b = [_]u8{0, 0, 0};
+        \\    std.mem.copy(u8, &b, &a);
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.SimdUtils.copy"));
+}
+
+test "pattern: @intCast gets manual review comment" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo(x: i64) i32 {
+        \\    return @intCast(x);
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "// safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)"));
+}
+
+test "pattern: @truncate gets manual review comment" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo(x: i32) i16 {
+        \\    return @truncate(x);
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "// safe-transpile: @truncate requires manual review — consider safe.CheckedInt(T).init(@truncate)"));
+}
+
+test "pattern: @bitCast gets manual review comment" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo(x: u32) i32 {
+        \\    return @bitCast(x);
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "// safe-transpile: @bitCast requires manual review"));
+}
+
+test "pattern: for with index access gets warning comment" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    const items = [_]u8{1, 2, 3};
+        \\    for (items, 0..) |item, i| {
+        \\        _ = item;
+        \\        _ = i;
+        \\    }
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "// safe-transpile: for with index access requires manual review"));
+}
+
+test "pattern: const ptr = &value → safe.OffsetPtr when used" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo(allocator: std.mem.Allocator) !void {
+        \\    var value: i32 = 42;
+        \\    const ptr = &value;
+        \\    ptr.* = 100;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.OffsetPtr.init(allocator, &value)"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "defer ptr.deinit()"));
+}
+
+test "pattern: const ptr = &value skipped when unused" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    var value: i32 = 42;
+        \\    const ptr = &value;
+        \\    _ = value;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should remain unchanged
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "const ptr = &value"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "safe.OffsetPtr"));
+}
+
+test "pattern: while (true) gets iteration limit" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    while (true) {
+        \\        if (done) break;
+        \\    }
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "var __zust_loop_counter: u64 = 0"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "__zust_loop_counter += 1"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "return error.InfiniteLoop"));
+}
+
+test "pattern: std.mem.indexOf gets comment" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\const std = @import("std");
+        \\fn foo() ?usize {
+        \\    return std.mem.indexOf(u8, "hello", "ll");
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "zust: use safe.String or safe.GuardedSlice for slice operations"));
+}
+
+test "pattern: std.heap.raw_c_allocator → safe.Pool" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\const std = @import("std");
+        \\fn foo() void {
+        \\    const alloc = std.heap.raw_c_allocator;
+        \\    _ = alloc;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.Pool"));
+}
+
+test "pattern: std.debug.print with pointer gets redacted" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    var x: i32 = 42;
+        \\    std.debug.print("{*}", .{&x});
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit(allocator);
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "zust: never print raw pointer addresses"));
 }
 
 // ─── CLI ───

@@ -1,4 +1,9 @@
 const std = @import("std");
+const Box = @import("Box.zig").Box;
+const Slice = @import("Slice.zig").Slice;
+const ArrayList = @import("ArrayList.zig").ArrayList;
+const VecDeque = @import("VecDeque.zig").VecDeque;
+const String = @import("String.zig").String;
 
 // ============================================================
 // Iterator Adapter Structs
@@ -345,11 +350,123 @@ pub fn ClonedIter(comptime Iter: type, comptime T: type) type {
     };
 }
 
-/// FlatMap adapter: map each element to an iterator, then flatten.
-///
-/// Placeholder - not yet implemented due to complexity of storing
-/// variable-length iterator chains at compile time.
-// pub fn FlatMapIter(...) type { ... }
+// ============================================================
+// Collection Iterators (consuming)
+// ============================================================
+
+/// Consuming iterator over `Slice(T)` elements.
+/// Yields elements by value (Copy-compatible types).
+/// The iterator takes ownership of the slice borrow.
+pub fn SliceIter(comptime T: type) type {
+    return struct {
+        slice: Slice(T),
+        index: usize,
+
+        const Self = @This();
+
+        pub fn init(slice: Slice(T)) Self {
+            return .{ .slice = slice, .index = 0 };
+        }
+
+        pub fn next(self: *Self) ?T {
+            if (self.index >= self.slice.len()) return null;
+            const val = self.slice.get(self.index).?;
+            self.index += 1;
+            return val;
+        }
+
+        pub fn len(self: *const Self) usize {
+            return self.slice.len() - self.index;
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.slice.release();
+        }
+    };
+}
+
+/// Consuming iterator over `ArrayList(T)` elements.
+/// Yields `Box(T, 0, 0, 0)` values by popping from the back (LIFO).
+/// The iterator owns the list; do not deinit the original after passing it in.
+pub fn ArrayListIter(comptime T: type) type {
+    return struct {
+        list: ArrayList(T),
+
+        const Self = @This();
+
+        pub fn init(list: ArrayList(T)) Self {
+            return .{ .list = list };
+        }
+
+        pub fn next(self: *Self) ?Box(T, 0, 0, 0) {
+            return self.list.pop();
+        }
+
+        pub fn len(self: *const Self) usize {
+            return self.list.len();
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.list.deinit();
+        }
+    };
+}
+
+/// Consuming iterator over `VecDeque(T)` elements.
+/// Yields `Box(T, 0, 0, 0)` values by popping from the front (FIFO).
+/// The iterator owns the deque; do not deinit the original after passing it in.
+pub fn VecDequeIter(comptime T: type) type {
+    return struct {
+        dq: VecDeque(T),
+
+        const Self = @This();
+
+        pub fn init(dq: VecDeque(T)) Self {
+            return .{ .dq = dq };
+        }
+
+        pub fn next(self: *Self) ?Box(T, 0, 0, 0) {
+            return self.dq.popFront();
+        }
+
+        pub fn len(self: *const Self) usize {
+            return self.dq.count();
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.dq.deinit();
+        }
+    };
+}
+
+/// Consuming iterator over `String` bytes.
+/// Yields each byte as a `u8`.
+/// The iterator owns the string; do not deinit the original after passing it in.
+pub const StringIter = struct {
+    string: String,
+    index: usize,
+
+    const Self = @This();
+
+    pub fn init(string: String) Self {
+        return .{ .string = string, .index = 0 };
+    }
+
+    pub fn next(self: *Self) ?u8 {
+        if (self.index >= self.string.len()) return null;
+        const b = self.string.slice()[self.index];
+        self.index += 1;
+        return b;
+    }
+
+    pub fn len(self: *const Self) usize {
+        return self.string.len() - self.index;
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.string.deinit();
+    }
+};
 
 // ============================================================
 // Test Helpers
@@ -378,7 +495,7 @@ fn RangeIter(comptime T: type) type {
     };
 }
 
-fn SliceIter(comptime T: type) type {
+fn TestSliceIter(comptime T: type) type {
     return struct {
         slice: []const T,
         index: usize,
@@ -401,7 +518,7 @@ fn SliceIter(comptime T: type) type {
     };
 }
 
-fn PtrSliceIter(comptime T: type) type {
+fn TestPtrSliceIter(comptime T: type) type {
     return struct {
         slice: []const T,
         index: usize,
@@ -514,8 +631,8 @@ test "EnumerateIter adds indices" {
 
 test "EnumerateIter over slice" {
     const items = [_]u32{ 10, 20, 30 };
-    const slice_it = SliceIter(u32).init(&items);
-    var enumerated = EnumerateIter(SliceIter(u32), u32).init(slice_it);
+    const slice_it = TestSliceIter(u32).init(&items);
+    var enumerated = EnumerateIter(TestSliceIter(u32), u32).init(slice_it);
 
     const first = enumerated.next().?;
     try std.testing.expectEqual(first.index, 0);
@@ -642,8 +759,8 @@ test "collectArrayList from range" {
 
 test "collectArrayList from slice" {
     const items = [_]u32{ 10, 20, 30 };
-    var slice_it = SliceIter(u32).init(&items);
-    var list = try collectArrayList(SliceIter(u32), u32, &slice_it, std.testing.allocator);
+    var slice_it = TestSliceIter(u32).init(&items);
+    var list = try collectArrayList(TestSliceIter(u32), u32, &slice_it, std.testing.allocator);
     defer list.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(list.items.len, 3);
@@ -735,8 +852,8 @@ test "ZipIter stops at shorter iterator" {
 
 test "ClonedIter clones integer pointers" {
     const items = [_]u32{ 10, 20, 30 };
-    const ptr_iter = PtrSliceIter(u32).init(&items);
-    var cloned = ClonedIter(PtrSliceIter(u32), u32).init(ptr_iter);
+    const ptr_iter = TestPtrSliceIter(u32).init(&items);
+    var cloned = ClonedIter(TestPtrSliceIter(u32), u32).init(ptr_iter);
 
     try std.testing.expectEqual(cloned.next().?, 10);
     try std.testing.expectEqual(cloned.next().?, 20);
@@ -746,8 +863,8 @@ test "ClonedIter clones integer pointers" {
 
 test "ClonedIter over empty slice" {
     const items = [_]u32{};
-    const ptr_iter = PtrSliceIter(u32).init(&items);
-    var cloned = ClonedIter(PtrSliceIter(u32), u32).init(ptr_iter);
+    const ptr_iter = TestPtrSliceIter(u32).init(&items);
+    var cloned = ClonedIter(TestPtrSliceIter(u32), u32).init(ptr_iter);
 
     try std.testing.expect(cloned.next() == null);
 }
@@ -878,4 +995,168 @@ test "max returns null for empty" {
         }
     }.f);
     try std.testing.expect(result == null);
+}
+
+// ============================================================
+// Tests: SliceIter
+// ============================================================
+
+test "SliceIter iterates over Slice" {
+    const arr = [_]u32{ 10, 20, 30 };
+    const slice = Slice(u32).fromStack(&arr);
+    var iter = SliceIter(u32).init(slice);
+
+    try std.testing.expectEqual(iter.len(), 3);
+    try std.testing.expectEqual(iter.next().?, 10);
+    try std.testing.expectEqual(iter.len(), 2);
+    try std.testing.expectEqual(iter.next().?, 20);
+    try std.testing.expectEqual(iter.next().?, 30);
+    try std.testing.expect(iter.next() == null);
+    try std.testing.expectEqual(iter.len(), 0);
+    iter.deinit();
+}
+
+test "SliceIter over empty slice" {
+    const arr = [_]u32{};
+    const slice = Slice(u32).fromStack(&arr);
+    var iter = SliceIter(u32).init(slice);
+
+    try std.testing.expectEqual(iter.len(), 0);
+    try std.testing.expect(iter.next() == null);
+    iter.deinit();
+}
+
+// ============================================================
+// Tests: ArrayListIter
+// ============================================================
+
+test "ArrayListIter consumes list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var list = ArrayList(u32).init(allocator);
+    try list.append(try Box(u32, 0, 0, 0).init(allocator, 10));
+    try list.append(try Box(u32, 0, 0, 0).init(allocator, 20));
+    try list.append(try Box(u32, 0, 0, 0).init(allocator, 30));
+
+    var iter = ArrayListIter(u32).init(list);
+    try std.testing.expectEqual(iter.len(), 3);
+
+    const v1 = iter.next().?;
+    try std.testing.expectEqual(v1.ptr.*, 30); // LIFO
+    const dead1 = v1.deinit();
+    _ = dead1;
+
+    const v2 = iter.next().?;
+    try std.testing.expectEqual(v2.ptr.*, 20);
+    const dead2 = v2.deinit();
+    _ = dead2;
+
+    const v3 = iter.next().?;
+    try std.testing.expectEqual(v3.ptr.*, 10);
+    const dead3 = v3.deinit();
+    _ = dead3;
+
+    try std.testing.expect(iter.next() == null);
+    try std.testing.expectEqual(iter.len(), 0);
+    iter.deinit();
+}
+
+test "ArrayListIter empty list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const list = ArrayList(u32).init(allocator);
+    var iter = ArrayListIter(u32).init(list);
+
+    try std.testing.expect(iter.next() == null);
+    try std.testing.expectEqual(iter.len(), 0);
+    iter.deinit();
+}
+
+// ============================================================
+// Tests: VecDequeIter
+// ============================================================
+
+test "VecDequeIter consumes deque" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var dq = try VecDeque(u32).init(allocator);
+    try dq.pushBack(try Box(u32, 0, 0, 0).init(allocator, 10));
+    try dq.pushBack(try Box(u32, 0, 0, 0).init(allocator, 20));
+    try dq.pushBack(try Box(u32, 0, 0, 0).init(allocator, 30));
+
+    var iter = VecDequeIter(u32).init(dq);
+    try std.testing.expectEqual(iter.len(), 3);
+
+    const v1 = iter.next().?;
+    try std.testing.expectEqual(v1.ptr.*, 10); // FIFO
+    const dead1 = v1.deinit();
+    _ = dead1;
+
+    const v2 = iter.next().?;
+    try std.testing.expectEqual(v2.ptr.*, 20);
+    const dead2 = v2.deinit();
+    _ = dead2;
+
+    const v3 = iter.next().?;
+    try std.testing.expectEqual(v3.ptr.*, 30);
+    const dead3 = v3.deinit();
+    _ = dead3;
+
+    try std.testing.expect(iter.next() == null);
+    try std.testing.expectEqual(iter.len(), 0);
+    iter.deinit();
+}
+
+test "VecDequeIter empty deque" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const dq = try VecDeque(u32).init(allocator);
+    var iter = VecDequeIter(u32).init(dq);
+
+    try std.testing.expect(iter.next() == null);
+    try std.testing.expectEqual(iter.len(), 0);
+    iter.deinit();
+}
+
+// ============================================================
+// Tests: StringIter
+// ============================================================
+
+test "StringIter iterates over bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const s = try String.initFromSlice(allocator, "abc");
+    var iter = StringIter.init(s);
+
+    try std.testing.expectEqual(iter.len(), 3);
+    try std.testing.expectEqual(iter.next().?, 'a');
+    try std.testing.expectEqual(iter.len(), 2);
+    try std.testing.expectEqual(iter.next().?, 'b');
+    try std.testing.expectEqual(iter.next().?, 'c');
+    try std.testing.expect(iter.next() == null);
+    try std.testing.expectEqual(iter.len(), 0);
+    iter.deinit();
+}
+
+test "StringIter empty string" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const s = String.init(allocator);
+    var iter = StringIter.init(s);
+
+    try std.testing.expect(iter.next() == null);
+    try std.testing.expectEqual(iter.len(), 0);
+    iter.deinit();
 }

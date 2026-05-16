@@ -12,9 +12,7 @@
 const std = @import("std");
 const safe = @import("safe");
 
-// GuardedSlice is documented but not yet re-exported from safe.zig, so we
-// import it via a dedicated module declared in build.zig.
-const GuardedSlice = @import("offsetguard").GuardedSlice;
+const GuardedSlice = safe.GuardedSlice;
 
 // ─── Per-request tracking struct (allocated in arena) ───
 
