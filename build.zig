@@ -79,6 +79,8 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("lib/Cell.zig"));
     run_analyzer.addFileArg(b.path("lib/HashMap.zig"));
     run_analyzer.addFileArg(b.path("lib/OnceCell.zig"));
+    run_analyzer.addFileArg(b.path("lib/LazyStatic.zig"));
+    run_analyzer.addFileArg(b.path("lib/SmallString.zig"));
     run_analyzer.addFileArg(b.path("lib/String.zig"));
     run_analyzer.addFileArg(b.path("lib/Cow.zig"));
     run_analyzer.addFileArg(b.path("lib/Iterators.zig"));
@@ -92,6 +94,10 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("lib/UnsafeCell.zig"));
     run_analyzer.addFileArg(b.path("lib/PhantomData.zig"));
     run_analyzer.addFileArg(b.path("lib/VecDeque.zig"));
+    run_analyzer.addFileArg(b.path("lib/RingBuffer.zig"));
+    run_analyzer.addFileArg(b.path("lib/Stack.zig"));
+    run_analyzer.addFileArg(b.path("lib/Pool.zig"));
+    run_analyzer.addFileArg(b.path("lib/OffsetGuard.zig"));
     run_analyzer.addFileArg(b.path("lib/Allocator.zig"));
     run_analyzer.addFileArg(b.path("lib/Lifetime.zig"));
     run_analyzer.addFileArg(b.path("lib/TaggedUnion.zig"));

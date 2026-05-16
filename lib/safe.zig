@@ -24,11 +24,19 @@ pub const RefMut = @import("Cell.zig").RefMut;
 pub const Arena = @import("Arena.zig").Arena;
 pub const ArenaBox = @import("Arena.zig").ArenaBox;
 pub const VecDeque = @import("VecDeque.zig").VecDeque;
+pub const RingBuffer = @import("RingBuffer.zig").RingBuffer;
+pub const Stack = @import("Stack.zig").Stack;
+pub const Queue = @import("Stack.zig").Queue;
 pub const String = @import("String.zig").String;
+pub const SmallString = @import("SmallString.zig").SmallString;
+pub const SmallString23 = @import("SmallString.zig").SmallString23;
+pub const SmallString15 = @import("SmallString.zig").SmallString15;
 pub const Cow = @import("Cow.zig").Cow;
 pub const OnceCell = @import("OnceCell.zig").OnceCell;
 pub const LazyCell = @import("OnceCell.zig").LazyCell;
 pub const OnceBox = @import("OnceCell.zig").OnceBox;
+pub const LazyStatic = @import("LazyStatic.zig").LazyStatic;
+pub const LazyStaticAlloc = @import("LazyStatic.zig").LazyStaticAlloc;
 pub const Iterators = @import("Iterators.zig");
 pub const ManuallyDrop = @import("ManuallyDrop.zig").ManuallyDrop;
 pub const MaybeUninit = @import("MaybeUninit.zig").MaybeUninit;
@@ -40,6 +48,11 @@ pub const UnsafeCell = @import("UnsafeCell.zig").UnsafeCell;
 pub const PhantomData = @import("PhantomData.zig").PhantomData;
 pub const Channel = @import("Channel.zig").Channel;
 pub const Oneshot = @import("Channel.zig").Oneshot;
+pub const Pool = @import("Pool.zig").Pool;
+pub const PoolBox = @import("Pool.zig").PoolBox;
+pub const FixedVec = @import("Pool.zig").FixedVec;
+comptime { _ = Pool; }
+comptime { _ = FixedVec; }
 pub const ZustAllocator = @import("Allocator.zig").ZustAllocator;
 pub const TrackingAllocator = @import("Allocator.zig").TrackingAllocator;
 pub const wrap = @import("Allocator.zig").wrap;
@@ -1519,6 +1532,82 @@ test "OnceBox deinit frees memory" {
     box.deinit();
     try std.testing.expect(!box.isInitialized());
     try std.testing.expect(box.get() == null);
+}
+
+// === LazyStatic Tests ===
+
+fn makeLazyStatic42() u32 {
+    return 42;
+}
+
+test "LazyStatic init and get" {
+    var lazy = LazyStatic(u32).init(makeLazyStatic42);
+    try std.testing.expect(!lazy.isInitialized());
+    try std.testing.expectEqual(lazy.get().*, 42);
+    try std.testing.expect(lazy.isInitialized());
+    try std.testing.expectEqual(lazy.get().*, 42);
+}
+
+test "LazyStatic getConst" {
+    var lazy = LazyStatic(u32).init(makeLazyStatic42);
+    const ptr = lazy.getConst();
+    try std.testing.expectEqual(ptr.*, 42);
+}
+
+test "LazyStatic same pointer" {
+    var lazy = LazyStatic(u32).init(makeLazyStatic42);
+    const ptr1 = lazy.get();
+    const ptr2 = lazy.get();
+    try std.testing.expectEqual(ptr1, ptr2);
+}
+
+test "LazyStatic thread-safe" {
+    var lazy = LazyStatic(u32).init(struct {
+        fn f() u32 {
+            return 123;
+        }
+    }.f);
+
+    var threads: [4]std.Thread = undefined;
+    var results: [4]*u32 = undefined;
+
+    for (&threads, &results) |*t, *r| {
+        t.* = try std.Thread.spawn(.{}, struct {
+            fn f(ctx: *LazyStatic(u32), out: **u32) void {
+                out.* = ctx.get();
+            }
+        }.f, .{ &lazy, r });
+    }
+
+    for (&threads) |*t| {
+        t.join();
+    }
+
+    for (&results) |r| {
+        try std.testing.expectEqual(r, results[0]);
+        try std.testing.expectEqual(r.*, 123);
+    }
+}
+
+test "LazyStaticAlloc with allocator" {
+    const Config = struct {
+        name: []const u8,
+    };
+
+    var lazy = LazyStaticAlloc(Config).initWithAlloc(struct {
+        fn f(allocator: std.mem.Allocator) anyerror!Config {
+            const name = try allocator.dupe(u8, "test");
+            return .{ .name = name };
+        }
+    }.f, std.testing.allocator);
+
+    const ptr = try lazy.get();
+    try std.testing.expectEqualStrings(ptr.name, "test");
+
+    const ptr2 = try lazy.get();
+    try std.testing.expectEqual(ptr, ptr2);
+
+    std.testing.allocator.free(ptr.name);
 }
 
 // === String Tests ===
