@@ -1260,3 +1260,72 @@ test "CLI JSON output is valid SARIF" {
     try std.testing.expect(std.mem.indexOf(u8, output, "UseAfterFree") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "test diagnostic") != null);
 }
+
+test "analyzer detects division by zero" {
+    const source =
+        \\fn testDivByZero() void {
+        \\    const x = 10 / 0;
+        \\    _ = x;
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(analyzer.hasDiagnostic(.DivisionByZero));
+}
+
+test "analyzer detects shift overflow" {
+    const source =
+        \\fn testShiftOverflow() void {
+        \\    const x: u32 = 1;
+        \\    const y = x << 32;
+        \\    _ = y;
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(analyzer.hasDiagnostic(.ShiftOverflow));
+}
+
+test "analyzer detects ptr cast without align" {
+    const source =
+        \\fn testPtrCast() void {
+        \\    var x: u32 = 42;
+        \\    const p: *u8 = @ptrCast(&x);
+        \\    _ = p;
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(analyzer.hasDiagnostic(.PtrCastWithoutAlign));
+}
+
+test "analyzer detects raw pointer arithmetic" {
+    const source =
+        \\fn testPtrArith() void {
+        \\    var ptr: [*]u8 = undefined;
+        \\    const x = ptr + 1;
+        \\    _ = x;
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(analyzer.hasDiagnostic(.RawPointerArithmetic));
+}
+
+test "analyzer detects unchecked index" {
+    const source =
+        \\fn testUncheckedIndex() void {
+        \\    var buf: [10]u32 = undefined;
+        \\    var i: usize = 5;
+        \\    buf[i] = 1;
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(analyzer.hasDiagnostic(.UncheckedIndex));
+}

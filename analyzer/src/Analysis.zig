@@ -70,6 +70,7 @@ const VarState = struct {
     array_len: ?u32 = null,
     is_std_resource: bool = false,   // std File, socket, stream, etc.
     has_cleanup: bool = false,        // close/deinit/destroy seen
+    bit_width: ?u32 = null,           // For shift overflow detection
 };
 
 /// Active iterator tracking for iterator invalidation detection.
@@ -117,6 +118,8 @@ pub const Analyzer = struct {
     has_try: bool = false,
     /// Variables deinit'd in errdefer blocks (name -> {})
     errdefer_deinits: std.StringHashMap(void),
+    /// Variables that have been bounds-checked in current scope
+    bounds_checked_vars: std.StringHashMap(void),
 
     pub fn init(gpa: std.mem.Allocator) Analyzer {
         return .{
@@ -131,6 +134,7 @@ pub const Analyzer = struct {
             .thread_spawns = false,
             .has_try = false,
             .errdefer_deinits = std.StringHashMap(void).init(gpa),
+            .bounds_checked_vars = std.StringHashMap(void).init(gpa),
         };
     }
 
@@ -159,6 +163,11 @@ pub const Analyzer = struct {
             self.gpa.free(entry.key_ptr.*);
         }
         self.errdefer_deinits.deinit();
+        var bc_iter = self.bounds_checked_vars.iterator();
+        while (bc_iter.next()) |entry| {
+            self.gpa.free(entry.key_ptr.*);
+        }
+        self.bounds_checked_vars.deinit();
     }
 
     /// Track a new pointer allocation using safe.LinkedList (each node is a safe.Box).
@@ -484,6 +493,11 @@ pub const Analyzer = struct {
             self.gpa.free(entry.key_ptr.*);
         }
         self.errdefer_deinits.clearRetainingCapacity();
+        var bc_iter = self.bounds_checked_vars.iterator();
+        while (bc_iter.next()) |entry| {
+            self.gpa.free(entry.key_ptr.*);
+        }
+        self.bounds_checked_vars.clearRetainingCapacity();
 
         // Analyze the function body
         try self.analyzeBlock(file_path, ast, body_node);
@@ -849,6 +863,10 @@ pub const Analyzer = struct {
                         if (getIntLiteralValue(ast, type_data.node_and_node[0])) |len| {
                             var_state.array_len = len;
                         }
+                    }
+                    var_state.bit_width = getTypeBitWidth(ast, type_node);
+                    if (isRawPointerType(ast, type_node)) {
+                        var_state.type_category = .Raw;
                     }
                 }
             }
@@ -1239,13 +1257,88 @@ pub const Analyzer = struct {
                 .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
                     const main_token = ast.nodes.items(.main_token)[i];
                     const builtin_name = ast.tokenSlice(main_token);
-                    if (std.mem.eql(u8, builtin_name, "@ptrCast") or std.mem.eql(u8, builtin_name, "@alignCast")) {
+                    if (std.mem.eql(u8, builtin_name, "@ptrCast")) {
+                        try self.checkPtrCast(file_path, ast, @enumFromInt(@as(u32, @intCast(i))));
+                        const token_loc = ast.tokenLocation(0, main_token);
+                        try self.addDiagnostic(file_path, .RawPattern, "raw unsafe cast detected; consider using safe types for type-safe conversions", @intCast(token_loc.line), @intCast(token_loc.column));
+                    } else if (std.mem.eql(u8, builtin_name, "@alignCast")) {
                         const token_loc = ast.tokenLocation(0, main_token);
                         try self.addDiagnostic(file_path, .RawPattern, "raw unsafe cast detected; consider using safe types for type-safe conversions", @intCast(token_loc.line), @intCast(token_loc.column));
                     }
                 },
                 else => {},
             }
+        }
+    }
+
+    fn checkDivisionByZero(self: *Analyzer, file_path: []const u8, ast: *const std.zig.Ast, node: zig.Ast.Node.Index) AnalyzeError!void {
+        const tag = ast.nodes.items(.tag)[@intFromEnum(node)];
+        if (tag != .div and tag != .mod) return;
+        const data = ast.nodes.items(.data)[@intFromEnum(node)];
+        const rhs = data.node_and_node[1];
+        if (getIntLiteralValue(ast, rhs)) |val| {
+            if (val == 0) {
+                const token_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(node)]);
+                try self.addDiagnostic(file_path, .DivisionByZero, "division by zero: divisor is compile-time constant 0", @intCast(token_loc.line), @intCast(token_loc.column));
+            }
+        }
+    }
+
+    fn checkShiftOverflow(self: *Analyzer, file_path: []const u8, ast: *const std.zig.Ast, node: zig.Ast.Node.Index) AnalyzeError!void {
+        const tag = ast.nodes.items(.tag)[@intFromEnum(node)];
+        if (tag != .shl and tag != .shl_sat and tag != .shr) return;
+        const data = ast.nodes.items(.data)[@intFromEnum(node)];
+        const lhs = data.node_and_node[0];
+        const rhs = data.node_and_node[1];
+        const shift_amount = getIntLiteralValue(ast, rhs) orelse return;
+        var max_bits: u32 = 128;
+        if (getVarName(ast, lhs)) |var_name| {
+            if (self.variables.get(var_name)) |var_state| {
+                if (var_state.bit_width) |bw| {
+                    max_bits = bw;
+                }
+            }
+        }
+        if (shift_amount >= max_bits) {
+            const token_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(node)]);
+            try self.addDiagnostic(file_path, .ShiftOverflow, "shift amount exceeds bit width of the shifted type", @intCast(token_loc.line), @intCast(token_loc.column));
+        }
+    }
+
+    fn checkPtrCast(self: *Analyzer, file_path: []const u8, ast: *const std.zig.Ast, node: zig.Ast.Node.Index) AnalyzeError!void {
+        const main_token = ast.nodes.items(.main_token)[@intFromEnum(node)];
+        const token_loc = ast.tokenLocation(0, main_token);
+        try self.addDiagnostic(file_path, .PtrCastWithoutAlign, "@ptrCast without @alignCast is unsafe; consider adding alignment check", @intCast(token_loc.line), @intCast(token_loc.column));
+    }
+
+    fn checkRawPointerArithmetic(self: *Analyzer, file_path: []const u8, ast: *const std.zig.Ast, node: zig.Ast.Node.Index) AnalyzeError!void {
+        const tag = ast.nodes.items(.tag)[@intFromEnum(node)];
+        if (tag != .add and tag != .add_wrap and tag != .sub and tag != .sub_wrap) return;
+        const data = ast.nodes.items(.data)[@intFromEnum(node)];
+        const lhs = data.node_and_node[0];
+        if (getVarName(ast, lhs)) |var_name| {
+            if (self.variables.get(var_name)) |var_state| {
+                if (var_state.type_category == .Raw) {
+                    const token_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(node)]);
+                    try self.addDiagnostic(file_path, .RawPointerArithmetic, "raw pointer arithmetic is unsafe; use slice operations or safe.Box instead", @intCast(token_loc.line), @intCast(token_loc.column));
+                }
+            }
+        }
+        const lhs_tag = ast.nodes.items(.tag)[@intFromEnum(lhs)];
+        if (lhs_tag == .address_of) {
+            const token_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(node)]);
+            try self.addDiagnostic(file_path, .RawPointerArithmetic, "raw pointer arithmetic is unsafe; use slice operations or safe.Box instead", @intCast(token_loc.line), @intCast(token_loc.column));
+        }
+    }
+
+    fn checkUncheckedIndex(self: *Analyzer, file_path: []const u8, ast: *const std.zig.Ast, node: zig.Ast.Node.Index) AnalyzeError!void {
+        const data = ast.nodes.items(.data)[@intFromEnum(node)];
+        const idx_expr = data.node_and_node[1];
+        if (getIntLiteralValue(ast, idx_expr) != null) return;
+        const idx_name = getVarName(ast, idx_expr) orelse return;
+        if (!self.bounds_checked_vars.contains(idx_name)) {
+            const token_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(node)]);
+            try self.addDiagnostic(file_path, .UncheckedIndex, "array/slice index may be out of bounds; consider adding a bounds check", @intCast(token_loc.line), @intCast(token_loc.column));
         }
     }
 
@@ -1327,6 +1420,7 @@ pub const Analyzer = struct {
                         }
                     }
                 }
+                try self.checkUncheckedIndex(file_path, ast, node);
                 try self.checkDerefs(file_path, ast, idx_expr);
             },
             .call, .call_comma, .call_one, .call_one_comma => {
@@ -1465,7 +1559,10 @@ pub const Analyzer = struct {
                 .InvalidMove,
                 .NullDereference,
                 .BufferOverflow,
-                .RawPattern => true,
+                .RawPattern,
+                .DivisionByZero,
+                .ShiftOverflow,
+                .RawPointerArithmetic => true,
                 else => false,
             },
             .Medium => switch (kind) {
@@ -1488,7 +1585,12 @@ pub const Analyzer = struct {
                 .StdAlternative,
                 .NullDereference,
                 .BufferOverflow,
-                .RawPattern => true,
+                .RawPattern,
+                .DivisionByZero,
+                .ShiftOverflow,
+                .RawPointerArithmetic,
+                .PtrCastWithoutAlign,
+                .UncheckedIndex => true,
             },
             .High => true,
         };
@@ -1532,8 +1634,8 @@ pub const Analyzer = struct {
             },
             .notes = &.{},
             .severity = switch (kind) {
-                .DoubleFree, .UseAfterFree, .UseAfterMove, .MutableAliasing, .StackUseAfterReturn, .DataRace, .Deadlock, .AlreadyInitialized, .NotInitialized, .ChannelClosed, .AlreadySent, .InvalidMove, .NullDereference, .BufferOverflow => .Error,
-                .MemoryLeak, .StdAlternative => .Warning,
+                .DoubleFree, .UseAfterFree, .UseAfterMove, .MutableAliasing, .StackUseAfterReturn, .DataRace, .Deadlock, .AlreadyInitialized, .NotInitialized, .ChannelClosed, .AlreadySent, .InvalidMove, .NullDereference, .BufferOverflow, .DivisionByZero, .ShiftOverflow, .RawPointerArithmetic => .Error,
+                .MemoryLeak, .StdAlternative, .PtrCastWithoutAlign, .UncheckedIndex => .Warning,
                 else => .Warning,
             },
             .fix = fix,
@@ -1589,7 +1691,17 @@ pub const Analyzer = struct {
                 var_state.null_status = .non_null;
             }
         }
+        // Detect bounds-check conditions like `if (i < buf.len)`
+        var bounds_var: ?[]const u8 = null;
+        if (extractBoundsCheckVar(ast, cond_expr)) |bv| {
+            bounds_var = try self.gpa.dupe(u8, bv);
+            try self.bounds_checked_vars.put(bounds_var.?, {});
+        }
         try self.analyzeBlock(file_path, ast, then_body);
+        if (bounds_var) |bv| {
+            _ = self.bounds_checked_vars.remove(bv);
+            self.gpa.free(bv);
+        }
 
         // Save then-final state for merging
         var then_state = try self.cloneVariables();
@@ -1836,6 +1948,9 @@ pub const Analyzer = struct {
                 const data = ast.nodes.items(.data)[@intFromEnum(node)];
                 try self.markReadsInExpr(file_path, ast, data.node_and_node[0]);
                 try self.markReadsInExpr(file_path, ast, data.node_and_node[1]);
+                try self.checkDivisionByZero(file_path, ast, node);
+                try self.checkShiftOverflow(file_path, ast, node);
+                try self.checkRawPointerArithmetic(file_path, ast, node);
             },
             .@"try" => {
                 const data = ast.nodes.items(.data)[@intFromEnum(node)];
@@ -2228,6 +2343,51 @@ fn getIntLiteralValue(ast: *const std.zig.Ast, node: zig.Ast.Node.Index) ?u32 {
         const main_token = ast.nodes.items(.main_token)[@intFromEnum(node)];
         const slice = ast.tokenSlice(main_token);
         return std.fmt.parseInt(u32, slice, 0) catch null;
+    }
+    return null;
+}
+
+fn getTypeBitWidth(ast: *const std.zig.Ast, type_node: zig.Ast.Node.Index) ?u32 {
+    const tag = ast.nodes.items(.tag)[@intFromEnum(type_node)];
+    if (tag == .identifier) {
+        const main_token = ast.nodes.items(.main_token)[@intFromEnum(type_node)];
+        const name = ast.tokenSlice(main_token);
+        if (std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "i8")) return 8;
+        if (std.mem.eql(u8, name, "u16") or std.mem.eql(u8, name, "i16")) return 16;
+        if (std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "i32")) return 32;
+        if (std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "i64")) return 64;
+        if (std.mem.eql(u8, name, "u128") or std.mem.eql(u8, name, "i128")) return 128;
+        if (std.mem.eql(u8, name, "usize") or std.mem.eql(u8, name, "isize")) return 64;
+        if (std.mem.eql(u8, name, "c_int") or std.mem.eql(u8, name, "c_uint") or std.mem.eql(u8, name, "c_short") or std.mem.eql(u8, name, "c_ushort")) return 16;
+        if (std.mem.eql(u8, name, "c_long") or std.mem.eql(u8, name, "c_ulong")) return 32;
+        if (std.mem.eql(u8, name, "c_longlong") or std.mem.eql(u8, name, "c_ulonglong")) return 64;
+    }
+    return null;
+}
+
+fn isFieldAccessLen(ast: *const std.zig.Ast, node: zig.Ast.Node.Index) bool {
+    const tag = ast.nodes.items(.tag)[@intFromEnum(node)];
+    if (tag != .field_access) return false;
+    const main_token = ast.nodes.items(.main_token)[@intFromEnum(node)];
+    return std.mem.eql(u8, ast.tokenSlice(main_token + 1), "len");
+}
+
+fn extractBoundsCheckVar(ast: *const std.zig.Ast, node: zig.Ast.Node.Index) ?[]const u8 {
+    const tag = ast.nodes.items(.tag)[@intFromEnum(node)];
+    if (tag == .less_than) {
+        const data = ast.nodes.items(.data)[@intFromEnum(node)];
+        const lhs = data.node_and_node[0];
+        const rhs = data.node_and_node[1];
+        if (getVarName(ast, lhs) != null and isFieldAccessLen(ast, rhs)) {
+            return getVarName(ast, lhs);
+        }
+    } else if (tag == .greater_than) {
+        const data = ast.nodes.items(.data)[@intFromEnum(node)];
+        const lhs = data.node_and_node[0];
+        const rhs = data.node_and_node[1];
+        if (getVarName(ast, rhs) != null and isFieldAccessLen(ast, lhs)) {
+            return getVarName(ast, rhs);
+        }
     }
     return null;
 }

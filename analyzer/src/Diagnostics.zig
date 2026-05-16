@@ -26,6 +26,11 @@ pub const DiagnosticKind = enum {
     StdAlternative,   // suggest zust alternative to std type
     NullDereference,
     BufferOverflow,
+    DivisionByZero,
+    ShiftOverflow,
+    PtrCastWithoutAlign,
+    RawPointerArithmetic,
+    UncheckedIndex,
 };
 
 pub fn displayName(kind: DiagnosticKind) []const u8 {
@@ -50,6 +55,11 @@ pub fn displayName(kind: DiagnosticKind) []const u8 {
         .StdAlternative => "std-alternative",
         .NullDereference => "null-dereference",
         .BufferOverflow => "buffer-overflow",
+        .DivisionByZero => "division-by-zero",
+        .ShiftOverflow => "shift-overflow",
+        .PtrCastWithoutAlign => "ptr-cast-without-align",
+        .RawPointerArithmetic => "raw-pointer-arithmetic",
+        .UncheckedIndex => "unchecked-index",
     };
 }
 
