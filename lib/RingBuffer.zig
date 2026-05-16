@@ -1,4 +1,5 @@
 const std = @import("std");
+const SimdUtils = @import("SimdUtils.zig");
 
 /// A fixed-capacity ring buffer (circular buffer).
 /// Producer writes, consumer reads. Overwrite mode or blocking mode.
@@ -63,6 +64,16 @@ pub fn RingBuffer(comptime T: type) type {
 
         /// Write a slice. Returns number of items written.
         pub fn writeSlice(self: *Self, values: []const T) !usize {
+            // SIMD fast path: non-wrapping contiguous byte region
+            if (@sizeOf(T) == 1 and values.len <= self.available() and self.tail + values.len <= self.buffer.len) {
+                const dst = @as([*]u8, @ptrCast(self.buffer.ptr))[self.tail .. self.tail + values.len];
+                const src = @as([*]const u8, @ptrCast(values.ptr))[0..values.len];
+                SimdUtils.copy(dst, src);
+                self.tail += values.len;
+                self.count += values.len;
+                return values.len;
+            }
+
             var written: usize = 0;
             for (values) |v| {
                 if (self.isFull()) break;
@@ -84,6 +95,17 @@ pub fn RingBuffer(comptime T: type) type {
         /// Read up to `n` items into caller-provided buffer.
         /// Returns number of items read.
         pub fn readInto(self: *Self, dest: []T) usize {
+            // SIMD fast path: non-wrapping contiguous byte region
+            if (@sizeOf(T) == 1 and self.head < self.tail) {
+                const copy_len = @min(dest.len, self.count);
+                const src = @as([*]const u8, @ptrCast(self.buffer.ptr))[self.head .. self.head + copy_len];
+                const dst = @as([*]u8, @ptrCast(dest.ptr))[0..copy_len];
+                SimdUtils.copy(dst, src);
+                self.head += copy_len;
+                self.count -= copy_len;
+                return copy_len;
+            }
+
             var read_count: usize = 0;
             for (dest) |*slot| {
                 if (self.isEmpty()) break;
