@@ -32,4 +32,6 @@ build_helper.zig
 
 # Generated docs (built in CI)
 docs/index.html
+docs/compare.html
+docs/api.html
 test_*
