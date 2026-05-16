@@ -111,6 +111,8 @@ pub const CheckedInt = @import("CheckedInt.zig").CheckedInt;
 pub const SaturatingInt = @import("CheckedInt.zig").SaturatingInt;
 comptime { _ = CheckedInt; }
 comptime { _ = SaturatingInt; }
+pub const BloomFilter = @import("BloomFilter.zig").BloomFilter;
+comptime { _ = BloomFilter; }
 pub const AlignedPtr = @import("Aligned.zig").AlignedPtr;
 pub const CacheAligned = @import("Aligned.zig").CacheAligned;
 
