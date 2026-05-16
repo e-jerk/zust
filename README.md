@@ -32,6 +32,23 @@ A standalone tool for general-purpose analysis that dog-foods the library.
 - **SARIF 2.1.0** output for CI integration
 - **LSP server mode** with `textDocument/publishDiagnostics`
 
+## Project Statistics
+
+```
+Library types:        52 files (50 types + safe.zig)
+Tests:                462/462 passing
+  - Library tests:   348
+  - SIMD tests:      47
+  - Fuzz tests:      4
+  - Analyzer tests:  63
+Analyzer detections:  30 bug classes
+SIMD speedups:        up to 15x on bulk operations
+Examples:             2 (HTTP server, JSON parser)
+Tools:                2 (transpiler, CLI analyzer)
+LSP features:         6 (diagnostics, completion, go-to-def, hover, code actions, incremental sync)
+CI targets:           5 cross-compile + 3 native
+```
+
 ## Quick Start
 
 ### Using the Library
@@ -1567,13 +1584,47 @@ The analyzer eats its own dog food:
 
 | Bug Class | Detection | Mechanism |
 |-----------|-----------|-----------|
+| **Memory Errors** |||
 | Use-after-free (raw ptr) | ✅ Error | Provenance: track raw pointers derived from Boxes |
 | Double-free | ✅ Error | Track variable `is_live` state |
 | Pointer escape | ✅ Error | Detect assignments to globals/fields from Boxes |
-| Raw allocation pattern | ✅ Warning | Flag `allocator.create(T)` → suggest `Box` |
-| Raw deallocation pattern | ✅ Warning | Flag `allocator.destroy(ptr)` → suggest `Box.deinit()` |
-| Raw pointer types | ✅ Warning | Flag `*T` in var decls, params, returns → suggest `Box` |
-| Raw pointer dereference | ✅ Warning | Flag `ptr.*` → suggest `.withImm()`/`.withMut()` |
+| Memory leak | ✅ Warning | Live zust types at scope/function exit |
+| Resource leak (error paths) | ✅ Warning | Missing `errdefer` cleanup |
+| Must-use return value | ✅ Warning | Discarded zust constructor result |
+| **Ownership Violations** |||
+| Use-after-move | ✅ Error | Track moved variable state |
+| Mutable aliasing | ✅ Error | Detect simultaneous mutable borrows |
+| Invalid move | ✅ Error | Moving non-Copy type without ownership |
+| **Concurrency** |||
+| Data race | ✅ Error | Shared mutable state across threads |
+| Deadlock | ✅ Error | Circular lock dependencies |
+| Lock order violation | ✅ Error | Out-of-order lock acquisition |
+| Recursive lock | ✅ Error | Same thread re-locks mutex |
+| Iterator invalidation | ✅ Error | Modifying collection during iteration |
+| **Initialization** |||
+| Uninitialized memory | ✅ Error | Read before write |
+| Not initialized | ✅ Error | `MaybeUninit`/`OnceCell` used before init |
+| Already initialized | ✅ Error | Double-init of `OnceCell`/`LazyStatic` |
+| Null dereference | ✅ Error | `opt.?` without null check |
+| **Bounds & Arithmetic** |||
+| Buffer overflow | ✅ Error | Compile-time array index out of bounds |
+| Unchecked index | ✅ Warning | Variable index without `if (i < len)` guard |
+| Division by zero | ✅ Error | Literal zero divisor |
+| Shift overflow | ✅ Error | Shift amount >= bit width |
+| **Unsafe Patterns** |||
+| Raw pointer arithmetic | ✅ Error | `ptr + n` on raw pointers |
+| PtrCast without align | ✅ Warning | `@ptrCast` without `@alignCast` |
+| Raw allocation | ✅ Warning | `allocator.create(T)` → suggest `Box` |
+| Raw deallocation | ✅ Warning | `allocator.destroy(ptr)` → suggest `Box.deinit()` |
+| Raw pointer types | ✅ Warning | `*T` in vars/params/returns → suggest `Box` |
+| Raw pointer dereference | ✅ Warning | `ptr.*` → suggest `.withImm()`/`.withMut()` |
+| **Zust-Specific** |||
+| ManuallyDrop not dropped | ✅ Warning | Missing `.drop()` before scope exit |
+| OnceCell double-set | ✅ Error | Second `.set()` call |
+| Mutex not unlocked | ✅ Warning | `MutexGuard` not deinit'd |
+| Pin moved | ✅ Error | Moving a pinned value |
+| Channel send-after-close | ✅ Error | Send to closed channel |
+| Already sent | ✅ Error | Second send on oneshot channel |
 
 ## What Neither Catches (Current Gaps)
 
@@ -1586,7 +1637,7 @@ These are known limitations. Contributions welcome.
 | Function return of raw pointer | Analyzer tracks only within single function body | High |
 | Pointer passed into callee | No call-graph analysis; callees are opaque | High |
 | Global pointer mutations | Globals are tracked as single entity, no points-to analysis | Medium |
-| Thread-safety | No atomic/lock tracking | Medium |
+| Send/Sync violations | Type-level thread safety (`Send`/`Sync` traits) not enforced | Medium |
 
 ### Array / Collection Safety
 
@@ -1594,26 +1645,73 @@ These are known limitations. Contributions welcome.
 |-----|-----|----------|
 | Array of Boxes with different states | Each state transition produces different type; arrays require homogeneous types | High |
 | `ArrayList(Box(T, ...))` | Same problem: can't store different types in one array | High |
-| Slice borrows | No `safe.Slice` type yet; raw `[]T` has no borrow checking | Medium |
+| Dynamic slice bounds (full) | We detect missing `if (i < len)` but not complex range reasoning | Medium |
 | HashMap values as Boxes | Requires homogeneous types | Medium |
 
 ### LSP / IDE Integration Gaps
 
 | Gap | Why | Priority |
 |-----|-----|----------|
-| Incremental sync | LSP uses full-document sync (`change = 1`); incremental requires position math | Medium |
 | Workspace-wide analysis | Only open documents are analyzed; no project-wide call graph | Medium |
 | Configurable strictness per-file | No `.zust.toml` or similar config yet | Low |
 | VS Code extension | No extension package published | Low |
+| Auto-fix application | Code actions are generated but not auto-applied on save | Medium |
 
 ### Standard Library Integration
 
 | Gap | Why | Priority |
 |-----|-----|----------|
-| `std.ArrayList` → `safe.ArrayList` | Not yet implemented; would need to store `Box` nodes | High |
-| `std.HashMap` → `safe.HashMap` | Key-value pairs as owned `Box` allocations | Medium |
 | `std.mem.Allocator` integration | `Box` wraps allocator manually; no allocator vtable integration | Low |
 | Async/await safety | No `@Frame` ownership tracking | Low |
+| Comptime evaluation | Analyzer doesn't evaluate comptime code paths | Medium |
+
+## Tools
+
+### `zust-transpile` — Safe Mode Transpiler
+
+Converts unsafe Zig code to zust-safe Zig via AST rewriting.
+
+```bash
+zig build transpile
+./zig-out/bin/zust-transpile input.zig output.zig
+```
+
+**Patterns rewritten:**
+| Unsafe Pattern | Safe Replacement |
+|----------------|------------------|
+| `allocator.create(T)` | `safe.Box(T, 0, 0, 0).init(allocator, undefined)` |
+| `allocator.destroy(ptr)` | `defer _ = ptr.deinit()` |
+| `std.ArrayList(T)` | `safe.ArrayList(T)` |
+| `std.StringHashMap(T)` | `safe.HashMap(safe.String, T)` |
+| `std.Thread.Mutex{}` | `safe.Mutex(void)` |
+| `opt.?` | `if (opt) \|value\| { value } else { return error.NullPointer; }` |
+| `var x: i32;` (uninit) | `var x: i32 = safe.CheckedInt(i32).init(0);` |
+
+The transpiler is itself written with zust types (`safe.String` for buffers, `safe.ArrayList` for edit tracking) and is analyzed by zust.
+
+### `zust-analyze` — CLI Analyzer
+
+Analyzes any Zig project for memory safety issues.
+
+```bash
+zig build
+./zig-out/bin/zust-analyze /path/to/project/src/
+
+# JSON output
+./zig-out/bin/zust-analyze --json /path/to/project/src/
+
+# SARIF output for CI
+./zig-out/bin/zust-analyze --sarif /path/to/project/src/ > results.sarif
+```
+
+Detects 30 bug classes including double-free, UAF, data races, null dereferences, buffer overflows, division by zero, and more.
+
+### OpenCode Agent Skill
+
+A `zust-transpile` skill is available for OpenCode agents at:
+`~/.config/opencode/skills/superpowers/zust-transpile/SKILL.md`
+
+Load it with: `Skill("zust-transpile")`
 
 ## Design Philosophy
 
