@@ -127,23 +127,31 @@ pub const Server = struct {
             return;
         };
 
-        if (std.mem.eql(u8, method, "initialize")) {
-            try self.handleInitialize(msg, writer);
-        } else if (std.mem.eql(u8, method, "initialized")) {
-            // No-op
-        } else if (std.mem.eql(u8, method, "shutdown")) {
-            try self.handleShutdown(msg, writer);
-        } else if (std.mem.eql(u8, method, "exit")) {
-            // Exit the process
-            std.process.exit(0);
-        } else if (std.mem.eql(u8, method, "textDocument/didOpen")) {
-            try self.handleDidOpen(msg);
-        } else if (std.mem.eql(u8, method, "textDocument/didChange")) {
-            try self.handleDidChange(msg);
-        } else if (std.mem.eql(u8, method, "textDocument/didClose")) {
-            try self.handleDidClose(msg);
-        } else {
-            std.log.debug("Unhandled method: {s}", .{method});
+        const methods = [_][]const u8{
+            "initialize",
+            "initialized",
+            "shutdown",
+            "exit",
+            "textDocument/didOpen",
+            "textDocument/didChange",
+            "textDocument/didClose",
+        };
+        var matched: usize = methods.len;
+        for (methods, 0..) |m, i| {
+            if (safe.SimdUtils.eql(method, m)) {
+                matched = i;
+                break;
+            }
+        }
+        switch (matched) {
+            0 => try self.handleInitialize(msg, writer),
+            1 => {}, // No-op
+            2 => try self.handleShutdown(msg, writer),
+            3 => std.process.exit(0),
+            4 => try self.handleDidOpen(msg),
+            5 => try self.handleDidChange(msg),
+            6 => try self.handleDidClose(msg),
+            else => std.log.debug("Unhandled method: {s}", .{method}),
         }
     }
 
