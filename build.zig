@@ -114,6 +114,7 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("lib/Pool.zig"));
     run_analyzer.addFileArg(b.path("lib/SimdUtils.zig"));
     run_analyzer.addFileArg(b.path("lib/OffsetGuard.zig"));
+    run_analyzer.addFileArg(b.path("lib/Aligned.zig"));
     run_analyzer.addFileArg(b.path("lib/Allocator.zig"));
     run_analyzer.addFileArg(b.path("lib/Lifetime.zig"));
     run_analyzer.addFileArg(b.path("lib/TaggedUnion.zig"));

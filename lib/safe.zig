@@ -98,6 +98,8 @@ pub const CheckedInt = @import("CheckedInt.zig").CheckedInt;
 pub const SaturatingInt = @import("CheckedInt.zig").SaturatingInt;
 comptime { _ = CheckedInt; }
 comptime { _ = SaturatingInt; }
+pub const AlignedPtr = @import("Aligned.zig").AlignedPtr;
+pub const CacheAligned = @import("Aligned.zig").CacheAligned;
 
 test "Box init and deinit" {
     const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
