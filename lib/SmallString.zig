@@ -1,4 +1,5 @@
 const std = @import("std");
+const SimdUtils = @import("SimdUtils.zig");
 
 /// Small String Optimized (SSO) string.
 /// Stores up to `inline_capacity` bytes inline on the stack.
@@ -144,14 +145,17 @@ pub fn SmallString(comptime inline_capacity: usize) type {
         }
 
         pub fn startsWith(self: *Self, prefix: []const u8) bool {
-            return std.mem.startsWith(u8, self.slice(), prefix);
+            return SimdUtils.startsWith(self.slice(), prefix);
         }
 
         pub fn endsWith(self: *Self, suffix: []const u8) bool {
-            return std.mem.endsWith(u8, self.slice(), suffix);
+            return SimdUtils.endsWith(self.slice(), suffix);
         }
 
         pub fn contains(self: *Self, needle: []const u8) bool {
+            if (needle.len == 1) {
+                return SimdUtils.findByte(self.slice(), needle[0]) != null;
+            }
             return std.mem.indexOf(u8, self.slice(), needle) != null;
         }
     };
