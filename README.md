@@ -13,7 +13,7 @@ Add zust to any Zig project in 30 seconds:
 
 ```bash
 cd your-zig-project
-/Users/barrett/github.com/e-jerk/zust/scripts/init-zust.sh
+./scripts/init-zust.sh
 ```
 
 Then copy-paste into `build.zig`:

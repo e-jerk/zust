@@ -13,13 +13,15 @@ pub fn build(b: *std.Build) void {
 
     // Library tests
     const lib_test_step = b.step("test", "Run library tests");
+    const lib_test_mod = b.createModule(.{
+        .root_source_file = b.path("lib/safe.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lib_test_mod.link_libc = true;
     const lib_tests = b.addTest(.{
         .name = "safe_tests",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("lib/safe.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = lib_test_mod,
     });
     lib_test_step.dependOn(&b.addRunArtifact(lib_tests).step);
 
@@ -30,6 +32,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     simd_test_mod.addImport("safe", safe_module);
+    simd_test_mod.link_libc = true;
     const simd_test = b.addTest(.{
         .name = "simd_tests",
         .root_module = simd_test_mod,
@@ -44,6 +47,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     fuzz_test_mod.addImport("safe", safe_module);
+    fuzz_test_mod.link_libc = true;
     const fuzz_test = b.addTest(.{
         .name = "fuzz_tests",
         .root_module = fuzz_test_mod,
@@ -58,6 +62,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     analyzer_mod.addImport("safe", safe_module);
+    analyzer_mod.link_libc = true;
     const analyzer_exe = b.addExecutable(.{
         .name = "zust-analyze",
         .root_module = analyzer_mod,
@@ -87,6 +92,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     analyzer_test_mod.addImport("safe", safe_module);
+    analyzer_test_mod.link_libc = true;
     const analyzer_tests = b.addTest(.{
         .name = "analyzer_tests",
         .root_module = analyzer_test_mod,
@@ -189,6 +195,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
     });
     http_example_mod.addImport("safe", safe_module);
+    http_example_mod.link_libc = true;
     const http_example = b.addExecutable(.{
         .name = "http_server",
         .root_module = http_example_mod,
@@ -203,6 +210,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
     });
     json_example_mod.addImport("safe", safe_module);
+    json_example_mod.link_libc = true;
     const json_example = b.addExecutable(.{
         .name = "json_parser",
         .root_module = json_example_mod,
@@ -218,6 +226,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
     });
     bench_mod.addImport("safe", safe_module);
+    bench_mod.link_libc = true;
     const bench_exe = b.addExecutable(.{
         .name = "benchmarks",
         .root_module = bench_mod,
@@ -232,6 +241,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     transpiler_mod.addImport("safe", safe_module);
+    transpiler_mod.link_libc = true;
     const transpiler_exe = b.addExecutable(.{
         .name = "zust-transpile",
         .root_module = transpiler_mod,
@@ -246,6 +256,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     transpiler_test_mod.addImport("safe", safe_module);
+    transpiler_test_mod.link_libc = true;
     const transpiler_tests = b.addTest(.{
         .name = "transpiler_tests",
         .root_module = transpiler_test_mod,
@@ -263,6 +274,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    docs_mod.link_libc = true;
     const docs_exe = b.addExecutable(.{
         .name = "generate-docs",
         .root_module = docs_mod,

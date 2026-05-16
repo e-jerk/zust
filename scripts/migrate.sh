@@ -2,7 +2,7 @@
 # migrate.sh — Auto-migrate a Zig project to zust
 set -euo pipefail
 
-ZUST_ROOT="/Users/barrett/github.com/e-jerk/zust"
+ZUST_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_ROOT="$(pwd)"
 
 # Colors

@@ -108,15 +108,12 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print(
             \\Usage: zust-analyze <path> [options]
             \\\
-
             \\Analyze a Zig source file or directory for memory safety issues.
             \\\
-
             \\Arguments:
             \\  <file.zig>          Analyze a single file
             \\  <directory>         Recursively analyze all .zig files in directory
             \\\
-
             \\Options:
             \\  --lsp               Run as LSP language server
             \\  --sarif             Output in SARIF 2.1.0 format
@@ -126,7 +123,6 @@ pub fn main(init: std.process.Init) !void {
             \\  --strictness=high   High strictness (may have false positives)
             \\  --help              Show this help message
             \\\
-
         , .{});
         if (help_mode) return;
         return error.InvalidUsage;
@@ -658,7 +654,8 @@ test "analyzer detects interprocedural use-after-free" {
     var found_uaf = false;
     for (analyzer.diagnostics.items) |diag| {
         if (std.mem.indexOf(u8, diag.message, "use-after-free: passing dangling pointer") != null or
-            std.mem.indexOf(u8, diag.message, "dangling pointer after deallocation") != null) {
+            std.mem.indexOf(u8, diag.message, "dangling pointer after deallocation") != null)
+        {
             found_uaf = true;
         }
     }
@@ -754,7 +751,8 @@ test "analyzer workspace detects cross-file use-after-free" {
     var found_uaf = false;
     for (analyzer.diagnostics.items) |diag| {
         if (std.mem.indexOf(u8, diag.message, "use-after-free: passing dangling pointer") != null or
-            std.mem.indexOf(u8, diag.message, "dangling pointer after deallocation") != null) {
+            std.mem.indexOf(u8, diag.message, "dangling pointer after deallocation") != null)
+        {
             found_uaf = true;
         }
     }

@@ -1009,7 +1009,7 @@ fn matchesQuery(query: []const u8, name: []const u8) bool {
     if (query.len == 0) return true;
     var i: usize = 0;
     while (i + query.len <= name.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(name[i..i + query.len], query)) return true;
+        if (std.ascii.eqlIgnoreCase(name[i .. i + query.len], query)) return true;
     }
     return false;
 }
@@ -1090,4 +1090,3 @@ fn byteOffsetToPosition(source: []const u8, offset: usize) struct { line: i32, c
     const character = @as(i32, @intCast(offset - line_start));
     return .{ .line = line, .character = character };
 }
-

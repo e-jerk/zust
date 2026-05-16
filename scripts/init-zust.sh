@@ -2,7 +2,7 @@
 # init-zust.sh — One-command zust integration for Zig projects
 set -euo pipefail
 
-ZUST_ROOT="/Users/barrett/github.com/e-jerk/zust"
+ZUST_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_ROOT="$(pwd)"
 BUILD_ZIG="${PROJECT_ROOT}/build.zig"
 BUILD_ZON="${PROJECT_ROOT}/build.zig.zon"

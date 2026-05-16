@@ -333,9 +333,7 @@ pub const Transpiler = struct {
                     const inner_name = ast.tokenSlice(ast.nodeMainToken(inner));
 
                     if (self.isPointerUsedLater(ptr_name, decl_span.end)) {
-                        const repl = try std.fmt.allocPrint(self.allocator,
-                            "var {s} = try safe.OffsetPtr.init(allocator, &{s}); defer {s}.deinit()",
-                            .{ ptr_name, inner_name, ptr_name });
+                        const repl = try std.fmt.allocPrint(self.allocator, "var {s} = try safe.OffsetPtr.init(allocator, &{s}); defer {s}.deinit()", .{ ptr_name, inner_name, ptr_name });
                         try self.addEdit(decl_span.start, decl_span.end, repl);
                     }
                 }
@@ -560,8 +558,8 @@ pub const Transpiler = struct {
 
     fn isIntType(type_text: []const u8) bool {
         const int_types = [_][]const u8{
-            "i8", "i16", "i32", "i64", "i128", "isize",
-            "u8", "u16", "u32", "u64", "u128", "usize",
+            "i8",      "i16",   "i32",    "i64",        "i128", "isize",
+            "u8",      "u16",   "u32",    "u64",        "u128", "usize",
             "c_short", "c_int", "c_long", "c_longlong",
         };
         for (int_types) |t| {

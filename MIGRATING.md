@@ -15,7 +15,7 @@
 
 ```bash
 cd your-zig-project
-/Users/barrett/github.com/e-jerk/zust/scripts/init-zust.sh
+.scripts/init-zust.sh
 ```
 
 This prints a copy-paste snippet for your `build.zig`.
@@ -39,9 +39,9 @@ exe.root_module.addImport("safe", safe_module);
 
 ```bash
 mkdir -p lib
-cp /Users/barrett/github.com/e-jerk/zust/lib/safe.zig lib/
+cp .lib/safe.zig lib/
 # Or all zust lib files if you need sub-modules
-cp -r /Users/barrett/github.com/e-jerk/zust/lib/*.zig lib/
+cp -r .lib/*.zig lib/
 ```
 
 ### Step 4: Verify
@@ -84,7 +84,7 @@ Replace these types **everywhere** in your codebase:
 
 ```bash
 cd your-zig-project
-/Users/barrett/github.com/e-jerk/zust/scripts/migrate.sh
+.scripts/migrate.sh
 ```
 
 This will:
@@ -120,7 +120,7 @@ rsync -av .zust-migrate/src/ src/
 
 ```bash
 # Build the transpiler
-cd /Users/barrett/github.com/e-jerk/zust
+cd zust
 zig build transpile
 
 # Run on one file
@@ -239,7 +239,7 @@ guard.deinit(); // auto-unlock
 ### Step 7: Verify with analyzer
 
 ```bash
-cd /Users/barrett/github.com/e-jerk/zust
+cd zust
 ./zig-out/bin/zust-analyze /path/to/your/project/src/
 ```
 

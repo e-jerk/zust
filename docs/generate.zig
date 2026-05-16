@@ -11,7 +11,8 @@ pub fn main(init: std.process.Init) !void {
     defer html.deinit(allocator);
 
     // HTML header
-    try html.appendSlice(allocator, 
+    try html.appendSlice(
+        allocator,
         \\<!DOCTYPE html>
         \\<html lang="en">
         \\<head>
@@ -39,8 +40,7 @@ pub fn main(init: std.process.Init) !void {
         \\    Library types: 52 files | Analyzer detections: 30 bug classes | Tests: 462+ passing
         \\  </div>
         \\  <h2>Library Modules</h2>
-        
-,
+        ,
     );
 
     // Scan lib/*.zig
@@ -104,13 +104,11 @@ pub fn main(init: std.process.Init) !void {
                     const is_pub = isPublic(ast, main_token);
                     if (is_pub) {
                         decl_count += 1;
-                        const decl_html = try std.fmt.allocPrint(allocator,
-                            "    <div class=\"decl\">\n      <code>pub const {s}</code>\n", .{decl_name});
+                        const decl_html = try std.fmt.allocPrint(allocator, "    <div class=\"decl\">\n      <code>pub const {s}</code>\n", .{decl_name});
                         defer allocator.free(decl_html);
                         try html.appendSlice(allocator, decl_html);
                         if (docs.items.len > 0) {
-                            const doc_html = try std.fmt.allocPrint(allocator,
-                                "      <div class=\"doc\">{s}</div>\n", .{docs.items});
+                            const doc_html = try std.fmt.allocPrint(allocator, "      <div class=\"doc\">{s}</div>\n", .{docs.items});
                             defer allocator.free(doc_html);
                             try html.appendSlice(allocator, doc_html);
                         }
@@ -125,13 +123,11 @@ pub fn main(init: std.process.Init) !void {
                             const is_pub = isPublic(ast, ast.nodes.items(.main_token)[@intFromEnum(decl)]);
                             if (is_pub) {
                                 decl_count += 1;
-                                const decl_html = try std.fmt.allocPrint(allocator,
-                                    "    <div class=\"decl\">\n      <code>pub fn {s}</code>\n", .{fn_name});
+                                const decl_html = try std.fmt.allocPrint(allocator, "    <div class=\"decl\">\n      <code>pub fn {s}</code>\n", .{fn_name});
                                 defer allocator.free(decl_html);
                                 try html.appendSlice(allocator, decl_html);
                                 if (docs.items.len > 0) {
-                                    const doc_html = try std.fmt.allocPrint(allocator,
-                                        "      <div class=\"doc\">{s}</div>\n", .{docs.items});
+                                    const doc_html = try std.fmt.allocPrint(allocator, "      <div class=\"doc\">{s}</div>\n", .{docs.items});
                                     defer allocator.free(doc_html);
                                     try html.appendSlice(allocator, doc_html);
                                 }
@@ -148,7 +144,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Footer
-    const footer_html = try std.fmt.allocPrint(allocator,
+    const footer_html = try std.fmt.allocPrint(
+        allocator,
         \\  <h2>Analyzer Detections</h2>
         \\  <div class="module">
         \\    <p>The zust analyzer detects <strong>30 bug classes</strong> including:</p>
@@ -166,8 +163,7 @@ pub fn main(init: std.process.Init) !void {
         \\  </footer>
         \\</body>
         \\</html>
-        
-,
+    ,
         .{ file_count, decl_count },
     );
     defer allocator.free(footer_html);
