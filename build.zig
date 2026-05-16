@@ -97,6 +97,7 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("lib/SmallString.zig"));
     run_analyzer.addFileArg(b.path("lib/String.zig"));
     run_analyzer.addFileArg(b.path("lib/Cow.zig"));
+    run_analyzer.addFileArg(b.path("lib/DeadlockDetector.zig"));
     run_analyzer.addFileArg(b.path("lib/Iterators.zig"));
     run_analyzer.addFileArg(b.path("lib/ManuallyDrop.zig"));
     run_analyzer.addFileArg(b.path("lib/MaybeUninit.zig"));
@@ -122,7 +123,7 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("lib/LockFreeQueue.zig"));
     run_analyzer.addFileArg(b.path("lib/AtomicCounter.zig"));
     run_analyzer.addFileArg(b.path("lib/TimedLock.zig"));
-    run_analyzer.addFileArg(b.path("lib/CheckedInt.zig"));
+    run_analyzer.addFileArg(b.path("lib/LockHierarchy.zig"));
     run_analyzer.addFileArg(b.path("lib/safe.zig"));
     // Analyzer files
     run_analyzer.addFileArg(b.path("analyzer/src/Analysis.zig"));
