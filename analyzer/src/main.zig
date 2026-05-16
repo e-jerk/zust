@@ -11,6 +11,8 @@ const Contract = @import("Contract.zig");
 // Dog-foods zust: imports safe types for use in tests and runtime.
 // safe.String is used below for JSON-RPC message building in LSP tests.
 
+const OutputFormat = enum { Human, SARIF };
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
@@ -19,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Check for --lsp mode first
     var lsp_mode = false;
-    var arg_buf: [256]u8 = undefined;
+    var arg_buf: [4096]u8 = undefined;
     var arg_len: usize = 0;
     while (args_iter.next()) |arg| {
         if (arg.len > arg_buf.len) continue;
@@ -50,29 +52,25 @@ pub fn main(init: std.process.Init) !void {
     args_iter = std.process.Args.Iterator.init(init.minimal.args);
     _ = args_iter.skip();
 
-    const file_path = args_iter.next() orelse {
-        std.debug.print(
-            \\Usage: zust-analyze <file.zig> [options]
-            \\
-            \\Options:
-            \\  --lsp               Run as LSP language server
-            \\  --sarif             Output in SARIF 2.1.0 format
-            \\  --strictness=low    Low strictness (catch definite bugs only)
-            \\  --strictness=medium Medium strictness (default)
-            \\  --strictness=high   High strictness (may have false positives)
-            \\
-        , .{});
-        return error.InvalidUsage;
-    };
-
-    var output_format: enum { Human, SARIF } = .Human;
+    var output_format: OutputFormat = .Human;
     var strictness: Analysis.Analyzer.Strictness = .Medium;
+    var help_mode = false;
+    var target_path: ?[]const u8 = null;
 
     while (args_iter.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--sarif")) {
+        if (arg.len > arg_buf.len) continue;
+        @memcpy(arg_buf[0..arg.len], arg);
+        arg_len = arg.len;
+        const arg_slice = arg_buf[0..arg_len];
+
+        if (std.mem.eql(u8, arg_slice, "--lsp")) {
+            lsp_mode = true;
+        } else if (std.mem.eql(u8, arg_slice, "--sarif") or std.mem.eql(u8, arg_slice, "--json")) {
             output_format = .SARIF;
-        } else if (std.mem.startsWith(u8, arg, "--strictness=")) {
-            const level = arg[13..];
+        } else if (std.mem.eql(u8, arg_slice, "--help")) {
+            help_mode = true;
+        } else if (std.mem.startsWith(u8, arg_slice, "--strictness=")) {
+            const level = arg_slice[13..];
             if (std.mem.eql(u8, level, "low")) {
                 strictness = .Low;
             } else if (std.mem.eql(u8, level, "medium")) {
@@ -80,39 +78,194 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, level, "high")) {
                 strictness = .High;
             }
+        } else if (!std.mem.startsWith(u8, arg_slice, "-")) {
+            target_path = try allocator.dupe(u8, arg_slice);
         }
     }
 
-    // Read source file
+    if (help_mode or target_path == null) {
+        std.debug.print(
+            \\Usage: zust-analyze <path> [options]
+            \\
+            \\Analyze a Zig source file or directory for memory safety issues.
+            \\
+            \\Arguments:
+            \\  <file.zig>          Analyze a single file
+            \\  <directory>         Recursively analyze all .zig files in directory
+            \\
+            \\Options:
+            \\  --lsp               Run as LSP language server
+            \\  --sarif             Output in SARIF 2.1.0 format
+            \\  --json              Alias for --sarif
+            \\  --strictness=low    Low strictness (catch definite bugs only)
+            \\  --strictness=medium Medium strictness (default)
+            \\  --strictness=high   High strictness (may have false positives)
+            \\  --help              Show this help message
+            \\
+        , .{});
+        if (help_mode) return;
+        return error.InvalidUsage;
+    }
+    defer if (target_path) |p| allocator.free(p);
+
     const io = init.io;
-    const source = std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(1 << 20)) catch |err| {
-        std.debug.print("Error: Failed to read {s}: {s}\n", .{ file_path, @errorName(err) });
+
+    // Check if target is a directory
+    var is_dir = false;
+    if (std.Io.Dir.cwd().openDir(io, target_path.?, .{ .iterate = true })) |d| {
+        d.close(io);
+        is_dir = true;
+    } else |_| {}
+
+    if (is_dir) {
+        try analyzeDirectory(allocator, io, target_path.?, output_format, strictness);
+        return;
+    }
+
+    // Single file mode
+    const source = std.Io.Dir.cwd().readFileAlloc(io, target_path.?, allocator, .limited(1 << 20)) catch |err| {
+        std.debug.print("Error: Failed to read {s}: {s}\n", .{ target_path.?, @errorName(err) });
         return err;
     };
     defer allocator.free(source);
 
-    // Run analysis
     var analyzer = Analysis.Analyzer.init(allocator);
     defer analyzer.deinit();
 
-    try analyzer.analyzeFile(file_path, source, strictness);
+    try analyzer.analyzeFile(target_path.?, source, strictness);
 
-    // Output results
     switch (output_format) {
         .Human => {
             for (analyzer.diagnostics.items) |diag| {
-                std.debug.print("Diagnostic: {s} - {s}\n", .{@tagName(diag.kind), diag.message});
+                std.debug.print("{s}:{d}:{d}: [{s}] {s}\n", .{
+                    diag.location.file,
+                    diag.location.line,
+                    diag.location.column,
+                    @tagName(diag.severity),
+                    diag.message,
+                });
             }
         },
         .SARIF => {
-            var buf: [4096]u8 = undefined;
+            var buf: [65536]u8 = undefined;
             var writer = std.Io.Writer.fixed(&buf);
             Diagnostic.emitSARIF(analyzer.diagnostics.items, &writer) catch {};
             std.debug.print("{s}\n", .{buf[0..writer.end]});
         },
     }
 
-    // Exit with error code if there are errors
+    var has_errors = false;
+    for (analyzer.diagnostics.items) |diag| {
+        if (diag.severity == .Error) {
+            has_errors = true;
+            break;
+        }
+    }
+
+    if (has_errors) {
+        return error.DiagnosticsFound;
+    }
+}
+
+fn collectZigFiles(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    path_prefix: []const u8,
+    files: *std.ArrayList([]const u8),
+) !void {
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        switch (entry.kind) {
+            .directory => {
+                var sub_dir = try dir.openDir(io, entry.name, .{ .iterate = true });
+                defer sub_dir.close(io);
+                const sub_path = try std.fs.path.join(allocator, &.{ path_prefix, entry.name });
+                defer allocator.free(sub_path);
+                try collectZigFiles(allocator, io, sub_dir, sub_path, files);
+            },
+            .file => {
+                if (std.mem.endsWith(u8, entry.name, ".zig")) {
+                    const full_path = try std.fs.path.join(allocator, &.{ path_prefix, entry.name });
+                    try files.append(allocator, full_path);
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+fn analyzeDirectory(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir_path: []const u8,
+    output_format: OutputFormat,
+    strictness: Analysis.Analyzer.Strictness,
+) !void {
+    var dir = if (std.fs.path.isAbsolute(dir_path))
+        try std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true })
+    else
+        try std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
+
+    var files: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (files.items) |f| allocator.free(f);
+        files.deinit(allocator);
+    }
+
+    try collectZigFiles(allocator, io, dir, dir_path, &files);
+
+    if (files.items.len == 0) {
+        std.debug.print("No .zig files found in {s}\n", .{dir_path});
+        return;
+    }
+
+    // For cross-file analysis, read all sources and use workspace mode
+    var workspace_files = try allocator.alloc(Analysis.Analyzer.WorkspaceFile, files.items.len);
+    defer {
+        for (workspace_files) |wf| {
+            allocator.free(wf.path);
+            allocator.free(wf.source);
+        }
+        allocator.free(workspace_files);
+    }
+
+    for (files.items, 0..) |file_path, i| {
+        workspace_files[i].path = try allocator.dupe(u8, file_path);
+        workspace_files[i].source = std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(1 << 20)) catch |err| {
+            std.debug.print("Warning: Failed to read {s}: {s}\n", .{ file_path, @errorName(err) });
+            workspace_files[i].source = "";
+            continue;
+        };
+    }
+
+    var analyzer = Analysis.Analyzer.init(allocator);
+    defer analyzer.deinit();
+
+    try analyzer.analyzeWorkspace(workspace_files, strictness);
+
+    switch (output_format) {
+        .Human => {
+            for (analyzer.diagnostics.items) |diag| {
+                std.debug.print("{s}:{d}:{d}: [{s}] {s}\n", .{
+                    diag.location.file,
+                    diag.location.line,
+                    diag.location.column,
+                    @tagName(diag.severity),
+                    diag.message,
+                });
+            }
+            std.debug.print("\nAnalyzed {d} files, found {d} issues\n", .{ files.items.len, analyzer.diagnostics.items.len });
+        },
+        .SARIF => {
+            var buf: [65536]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buf);
+            Diagnostic.emitSARIF(analyzer.diagnostics.items, &writer) catch {};
+            std.debug.print("{s}\n", .{buf[0..writer.end]});
+        },
+    }
+
     var has_errors = false;
     for (analyzer.diagnostics.items) |diag| {
         if (diag.severity == .Error) {
@@ -913,4 +1066,197 @@ test "Analyzer no false positive null deref on non-null optional" {
     defer analyzer.deinit();
     try analyzer.analyzeFile("test.zig", source, .Medium);
     try std.testing.expect(!analyzer.hasDiagnostic(.NullDereference));
+}
+
+test "Fix generated for missing deinit" {
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const source =
+        \\fn testLeak() void {
+        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    _ = box;
+        \\}
+    ;
+
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+
+    var found_fix = false;
+    for (analyzer.diagnostics.items) |diag| {
+        if (diag.kind == .MemoryLeak and diag.fix != null) {
+            if (std.mem.eql(u8, diag.fix.?.description, "Add defer deinit")) {
+                found_fix = true;
+            }
+        }
+    }
+    try std.testing.expect(found_fix);
+}
+
+test "Fix generated for raw allocator.create" {
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const source =
+        \\fn testRawCreate() void {
+        \\    const ptr = std.heap.page_allocator.create(u32);
+        \\    _ = ptr;
+        \\}
+    ;
+
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+
+    var found_fix = false;
+    for (analyzer.diagnostics.items) |diag| {
+        if (std.mem.indexOf(u8, diag.message, "raw allocator.create") != null and diag.fix != null) {
+            if (std.mem.eql(u8, diag.fix.?.description, "Replace with safe.Box")) {
+                found_fix = true;
+            }
+        }
+    }
+    try std.testing.expect(found_fix);
+}
+
+test "Fix generated for missing errdefer" {
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const source =
+        \\fn testLeak() !void {
+        \\    var file = safe.FileGuard.init();
+        \\    try somethingThatMayFail();
+        \\    _ = file;
+        \\}
+        \\fn somethingThatMayFail() !void { return error.Oops; }
+    ;
+
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+
+    var found_fix = false;
+    for (analyzer.diagnostics.items) |diag| {
+        if (std.mem.indexOf(u8, diag.message, "Resource leak") != null and diag.fix != null) {
+            if (std.mem.eql(u8, diag.fix.?.description, "Add errdefer deinit")) {
+                found_fix = true;
+            }
+        }
+    }
+    try std.testing.expect(found_fix);
+}
+
+test "Fix generated for null dereference" {
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const source =
+        \\fn testNullDeref() void {
+        \\    var opt: ?u32 = null;
+        \\    _ = opt.?;
+        \\}
+    ;
+
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+
+    var found_fix = false;
+    for (analyzer.diagnostics.items) |diag| {
+        if (diag.kind == .NullDereference and diag.fix != null) {
+            if (std.mem.eql(u8, diag.fix.?.description, "Add null check")) {
+                found_fix = true;
+            }
+        }
+    }
+    try std.testing.expect(found_fix);
+}
+
+// === CLI Tests ===
+
+test "CLI directory analysis collects zig files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const io = std.testing.io;
+
+    // Create test files in temp dir
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.zig", .data = "fn main() void {}" });
+
+    // Create subdirectory with another file
+    try tmp.dir.createDirPath(io, "src");
+    var sub_dir = try tmp.dir.openDir(io, "src", .{ .iterate = true });
+    defer sub_dir.close(io);
+    try sub_dir.writeFile(io, .{ .sub_path = "lib.zig", .data = "fn lib() void {}" });
+
+    // Also create a non-zig file
+    try tmp.dir.writeFile(io, .{ .sub_path = "readme.md", .data = "# Test" });
+
+    var files: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (files.items) |f| std.testing.allocator.free(f);
+        files.deinit(std.testing.allocator);
+    }
+
+    try collectZigFiles(std.testing.allocator, io, tmp.dir, ".", &files);
+
+    try std.testing.expectEqual(@as(usize, 2), files.items.len);
+
+    var found_main = false;
+    var found_lib = false;
+    for (files.items) |path| {
+        if (std.mem.endsWith(u8, path, "main.zig")) found_main = true;
+        if (std.mem.endsWith(u8, path, "lib.zig")) found_lib = true;
+    }
+    try std.testing.expect(found_main);
+    try std.testing.expect(found_lib);
+}
+
+test "CLI detects @ptrCast in external code" {
+    const source =
+        \\fn testPtrCast() void {
+        \\    var x: u32 = 42;
+        \\    const p: *u8 = @ptrCast(&x);
+        \\    _ = p;
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(analyzer.hasDiagnostic(.RawPattern));
+}
+
+test "CLI detects missing close for file handle" {
+    const source =
+        \\fn testFile() void {
+        \\    var file = std.fs.cwd().openFile("foo.txt", .{});
+        \\    _ = file;
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(analyzer.hasDiagnostic(.MemoryLeak));
+}
+
+test "CLI JSON output is valid SARIF" {
+    const gpa = std.testing.allocator;
+
+    var diagnostics: std.ArrayList(Diagnostic.Diagnostic) = .empty;
+    defer diagnostics.deinit(gpa);
+
+    try diagnostics.append(gpa, .{
+        .kind = .UseAfterFree,
+        .message = "test diagnostic",
+        .location = .{
+            .file = "test.zig",
+            .line = 1,
+            .column = 1,
+        },
+        .notes = &.{},
+        .severity = .Error,
+    });
+
+    var buf: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try Diagnostic.emitSARIF(diagnostics.items, &writer);
+
+    const output = buf[0..writer.end];
+    try std.testing.expect(std.mem.indexOf(u8, output, "sarif-schema-2.1.0.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "UseAfterFree") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "test diagnostic") != null);
 }

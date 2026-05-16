@@ -137,6 +137,7 @@ pub const Server = struct {
             "textDocument/didClose",
             "textDocument/completion",
             "textDocument/definition",
+            "textDocument/codeAction",
         };
         var matched: usize = methods.len;
         for (methods, 0..) |m, i| {
@@ -155,6 +156,7 @@ pub const Server = struct {
             6 => try self.handleDidClose(msg),
             7 => try self.handleCompletion(msg, writer),
             8 => try self.handleDefinition(msg, writer),
+            9 => try self.handleCodeAction(msg, writer),
             else => std.log.debug("Unhandled method: {s}", .{method}),
         }
     }
@@ -396,6 +398,64 @@ pub const Server = struct {
         try JSONRPC.writeMessage(response, writer, std.heap.page_allocator);
     }
 
+    fn handleCodeAction(self: *Server, msg: JSONRPC.Message, writer: *std.Io.Writer) !void {
+        const params = msg.params orelse return;
+        const text_doc = params.object.get("textDocument") orelse return;
+        const uri = text_doc.object.get("uri") orelse return;
+        const uri_str = uri.string;
+
+        const doc = self.documents.get(uri_str) orelse return;
+
+        // Re-analyze to get current diagnostics with fixes
+        const analyzer = self.analyzer.unsafePtr();
+        analyzer.diagnostics.clearRetainingCapacity();
+        analyzer.analyzeFile(uri_str, doc.source, .Medium) catch return;
+
+        const arena_alloc = self.arena.allocator();
+        var actions = std.json.Array.init(arena_alloc);
+
+        for (analyzer.diagnostics.items) |diag| {
+            if (diag.fix) |fix| {
+                var action: std.json.ObjectMap = .empty;
+                try action.put(arena_alloc, "title", .{ .string = try arena_alloc.dupe(u8, fix.description) });
+                try action.put(arena_alloc, "kind", .{ .string = "quickfix" });
+
+                var edit: std.json.ObjectMap = .empty;
+                var changes: std.json.ObjectMap = .empty;
+                var doc_edits = std.json.Array.init(arena_alloc);
+
+                for (fix.replacements) |rep| {
+                    var doc_edit: std.json.ObjectMap = .empty;
+                    var range: std.json.ObjectMap = .empty;
+                    var start: std.json.ObjectMap = .empty;
+                    try start.put(arena_alloc, "line", .{ .integer = @intCast(rep.start_line) });
+                    try start.put(arena_alloc, "character", .{ .integer = @intCast(rep.start_col) });
+                    var end: std.json.ObjectMap = .empty;
+                    try end.put(arena_alloc, "line", .{ .integer = @intCast(rep.end_line) });
+                    try end.put(arena_alloc, "character", .{ .integer = @intCast(rep.end_col) });
+                    try range.put(arena_alloc, "start", .{ .object = start });
+                    try range.put(arena_alloc, "end", .{ .object = end });
+                    try doc_edit.put(arena_alloc, "range", .{ .object = range });
+                    try doc_edit.put(arena_alloc, "newText", .{ .string = try arena_alloc.dupe(u8, rep.new_text) });
+                    try doc_edits.append(.{ .object = doc_edit });
+                }
+
+                try changes.put(arena_alloc, try arena_alloc.dupe(u8, uri_str), .{ .array = doc_edits });
+                try edit.put(arena_alloc, "changes", .{ .object = changes });
+                try action.put(arena_alloc, "edit", .{ .object = edit });
+
+                try actions.append(.{ .object = action });
+            }
+        }
+
+        const response = JSONRPC.Message{
+            .jsonrpc = "2.0",
+            .id = msg.id,
+            .result = .{ .array = actions },
+        };
+        try JSONRPC.writeMessage(response, writer, arena_alloc);
+    }
+
     fn handleDidClose(self: *Server, msg: JSONRPC.Message) !void {
         const params = msg.params orelse return;
 
@@ -451,6 +511,7 @@ pub const Server = struct {
                 },
                 .code = @tagName(diag.kind),
                 .message = try self.gpa.dupe(u8, diag.message),
+                .fix = diag.fix,
             });
         }
 
@@ -489,6 +550,30 @@ pub const Server = struct {
                 try diag_obj.put(arena_alloc, "message", .{ .string = try arena_alloc.dupe(u8, msg) });
             } else {
                 try diag_obj.put(arena_alloc, "message", .{ .string = "" });
+            }
+
+            if (diag.fix) |fix| {
+                var fix_obj: std.json.ObjectMap = .empty;
+                try fix_obj.put(arena_alloc, "title", .{ .string = try arena_alloc.dupe(u8, fix.description) });
+
+                var edits = std.json.Array.init(arena_alloc);
+                for (fix.replacements) |rep| {
+                    var edit: std.json.ObjectMap = .empty;
+                    var rep_range: std.json.ObjectMap = .empty;
+                    var rep_start: std.json.ObjectMap = .empty;
+                    try rep_start.put(arena_alloc, "line", .{ .integer = @intCast(rep.start_line) });
+                    try rep_start.put(arena_alloc, "character", .{ .integer = @intCast(rep.start_col) });
+                    var rep_end: std.json.ObjectMap = .empty;
+                    try rep_end.put(arena_alloc, "line", .{ .integer = @intCast(rep.end_line) });
+                    try rep_end.put(arena_alloc, "character", .{ .integer = @intCast(rep.end_col) });
+                    try rep_range.put(arena_alloc, "start", .{ .object = rep_start });
+                    try rep_range.put(arena_alloc, "end", .{ .object = rep_end });
+                    try edit.put(arena_alloc, "range", .{ .object = rep_range });
+                    try edit.put(arena_alloc, "newText", .{ .string = try arena_alloc.dupe(u8, rep.new_text) });
+                    try edits.append(.{ .object = edit });
+                }
+                try fix_obj.put(arena_alloc, "edits", .{ .array = edits });
+                try diag_obj.put(arena_alloc, "data", .{ .object = fix_obj });
             }
 
             try diag_array.append(.{ .object = diag_obj });
@@ -629,6 +714,7 @@ pub const Server = struct {
         severity: i32,
         code: []const u8,
         message: ?[]const u8,
+        fix: ?Diagnostic.Fix = null,
 
         const Range = struct {
             start: Position,

@@ -53,12 +53,26 @@ pub fn displayName(kind: DiagnosticKind) []const u8 {
     };
 }
 
+pub const Fix = struct {
+    description: []const u8,
+    replacements: []const Replacement,
+};
+
+pub const Replacement = struct {
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+    new_text: []const u8,
+};
+
 pub const Diagnostic = struct {
     kind: DiagnosticKind,
     message: []const u8,
     location: SourceLocation,
     notes: []const Note,
     severity: Severity,
+    fix: ?Fix = null,
 
     pub const Severity = enum {
         Error,

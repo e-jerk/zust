@@ -68,6 +68,8 @@ const VarState = struct {
     is_written: bool = false,        // For race detection
     null_status: enum { unknown, null, non_null } = .unknown,
     array_len: ?u32 = null,
+    is_std_resource: bool = false,   // std File, socket, stream, etc.
+    has_cleanup: bool = false,        // close/deinit/destroy seen
 };
 
 /// Active iterator tracking for iterator invalidation detection.
@@ -133,6 +135,11 @@ pub const Analyzer = struct {
     }
 
     pub fn deinit(self: *Analyzer) void {
+        for (self.diagnostics.items) |diag| {
+            if (diag.fix) |fix| {
+                self.gpa.free(fix.replacements);
+            }
+        }
         self.diagnostics.deinit(self.gpa);
         self.tracked_pointers.deinit();
         var iter = self.variables.iterator();
@@ -314,6 +321,9 @@ pub const Analyzer = struct {
                 try self.analyzeFnDecl(file_path, ast_box.ptr, @intFromEnum(decl));
             }
         }
+
+        // Pass 3: Check for raw builtins across entire file
+        try self.checkBuiltins(file_path, ast_box.ptr);
     }
 
     /// Pass 1: Extract function signature information for cross-function analysis.
@@ -491,14 +501,40 @@ pub const Analyzer = struct {
             // Resource leak in error paths
             if (self.has_try and var_state.is_live and isZustType(var_state.type_category)) {
                 if (!self.errdefer_deinits.contains(var_state.name)) {
-                    try self.addDiagnostic(file_path, .MemoryLeak, "Resource leak: not deinit'd in error path", var_state.decl_line, var_state.decl_col);
+                    var errdefer_replacements = try self.gpa.alloc(Diagnostic.Replacement, 1);
+                    errdefer_replacements[0] = .{
+                        .start_line = var_state.decl_line,
+                        .start_col = 0,
+                        .end_line = var_state.decl_line,
+                        .end_col = 0,
+                        .new_text = "errdefer resource.deinit();\n",
+                    };
+                    try self.addDiagnosticWithFix(file_path, .MemoryLeak, "Resource leak: not deinit'd in error path", var_state.decl_line, var_state.decl_col, .{
+                        .description = "Add errdefer deinit",
+                        .replacements = errdefer_replacements,
+                    });
                 }
             }
             // General leak check for zust types
             if (var_state.is_live and isZustType(var_state.type_category)) {
                 if (var_state.type_category != .ManuallyDrop and var_state.type_category != .Mutex and var_state.type_category != .RwLock) {
-                    try self.addDiagnostic(file_path, .MemoryLeak, "Memory leak: zust type never freed before end of function", var_state.decl_line, var_state.decl_col);
+                    var defer_replacements = try self.gpa.alloc(Diagnostic.Replacement, 1);
+                    defer_replacements[0] = .{
+                        .start_line = var_state.decl_line,
+                        .start_col = 0,
+                        .end_line = var_state.decl_line,
+                        .end_col = 0,
+                        .new_text = "defer box.deinit();\n",
+                    };
+                    try self.addDiagnosticWithFix(file_path, .MemoryLeak, "Memory leak: zust type never freed before end of function", var_state.decl_line, var_state.decl_col, .{
+                        .description = "Add defer deinit",
+                        .replacements = defer_replacements,
+                    });
                 }
+            }
+            // Resource leak check for std file/socket handles and raw allocations
+            if (var_state.is_std_resource and var_state.is_live and !var_state.has_cleanup) {
+                try self.addDiagnostic(file_path, .MemoryLeak, "Resource leak: file/socket handle or raw allocation not closed before end of function; consider defer close() or destroy()", var_state.decl_line, var_state.decl_col);
             }
             // Race condition detection
             if (self.thread_spawns and var_state.is_mutable and var_state.is_read and var_state.is_written) {
@@ -756,6 +792,20 @@ pub const Analyzer = struct {
                 }
             }
 
+            // Detect std resource initialization (File, socket, etc.)
+            if (isStdResourceInit(ast, init_expr)) {
+                if (self.variables.getPtr(decl_name)) |var_state| {
+                    var_state.is_std_resource = true;
+                }
+            }
+
+            // Detect raw allocator.create() for cleanup tracking
+            if (isRawCreateCall(ast, init_expr)) {
+                if (self.variables.getPtr(decl_name)) |var_state| {
+                    var_state.is_std_resource = true;
+                }
+            }
+
             // Check for Pin move in variable initialization
             const init_tag2 = ast.nodes.items(.tag)[@intFromEnum(init_expr)];
             if (init_tag2 == .identifier) {
@@ -1004,6 +1054,11 @@ pub const Analyzer = struct {
                 .borrowMut => {},
                 .destroy => try self.checkDestroy(file_path, ast, node),
                 .create => try self.checkRawCreate(file_path, ast, node),
+                .close => {
+                    if (self.variables.getPtr(base_var)) |var_state| {
+                        var_state.has_cleanup = true;
+                    }
+                },
                 else => {},
             }
             // Thread spawn detection for method calls too
@@ -1106,7 +1161,18 @@ pub const Analyzer = struct {
 
     fn checkRawCreate(self: *Analyzer, file_path: []const u8, ast: *const std.zig.Ast, node: zig.Ast.Node.Index) AnalyzeError!void {
         const token_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(node)]);
-        try self.addDiagnostic(file_path, .UseAfterFree, "raw allocator.create(T) detected; consider using safe.Box(T, 0, 0, 0).init(allocator, value) instead", @intCast(token_loc.line), @intCast(token_loc.column));
+        var replacements = try self.gpa.alloc(Diagnostic.Replacement, 1);
+        replacements[0] = .{
+            .start_line = @intCast(token_loc.line),
+            .start_col = 0,
+            .end_line = @intCast(token_loc.line),
+            .end_col = 999,
+            .new_text = "safe.Box(T, 0, 0, 0).init(allocator, value)",
+        };
+        try self.addDiagnosticWithFix(file_path, .UseAfterFree, "raw allocator.create(T) detected; consider using safe.Box(T, 0, 0, 0).init(allocator, value) instead", @intCast(token_loc.line), @intCast(token_loc.column), .{
+            .description = "Replace with safe.Box",
+            .replacements = replacements,
+        });
     }
 
     fn checkDeinit(self: *Analyzer, file_path: []const u8, ast: *const std.zig.Ast, node: zig.Ast.Node.Index) AnalyzeError!void {
@@ -1115,12 +1181,24 @@ pub const Analyzer = struct {
 
         if (self.variables.getPtr(base_var)) |var_state| {
             if (!var_state.is_live) {
-                try self.addDiagnostic(file_path, .DoubleFree, "double free detected", @intCast(token_loc.line), @intCast(token_loc.column));
+                var replacements = try self.gpa.alloc(Diagnostic.Replacement, 1);
+                replacements[0] = .{
+                    .start_line = @intCast(token_loc.line),
+                    .start_col = 0,
+                    .end_line = @intCast(token_loc.line),
+                    .end_col = 999,
+                    .new_text = "",
+                };
+                try self.addDiagnosticWithFix(file_path, .DoubleFree, "double free detected", @intCast(token_loc.line), @intCast(token_loc.column), .{
+                    .description = "Remove duplicate deinit",
+                    .replacements = replacements,
+                });
             } else if (!var_state.is_box) {
                 try self.addDiagnostic(file_path, .UseAfterFree, "deinit called on non-Box type", @intCast(token_loc.line), @intCast(token_loc.column));
             } else {
                 // Mark as deallocated
                 var_state.is_live = false;
+                var_state.has_cleanup = true;
 
                 // Check if any raw pointers derived from this box are still live
                 // and mark them as dead too (since the source Box is gone)
@@ -1146,10 +1224,28 @@ pub const Analyzer = struct {
                 try self.addDiagnostic(file_path, .DoubleFree, "double free (destroy) detected", @intCast(token_loc.line), @intCast(token_loc.column));
             } else {
                 var_state.is_live = false;
+                var_state.has_cleanup = true;
             }
         } else {
             // Raw destroy on untracked pointer - suggest using Box
             try self.addDiagnostic(file_path, .UseAfterFree, "raw allocator.destroy(ptr) detected; consider using safe.Box(T, 0, 0, 0).deinit() instead", @intCast(token_loc.line), @intCast(token_loc.column));
+        }
+    }
+
+    fn checkBuiltins(self: *Analyzer, file_path: []const u8, ast: *const std.zig.Ast) AnalyzeError!void {
+        const tags = ast.nodes.items(.tag);
+        for (tags, 0..) |tag, i| {
+            switch (tag) {
+                .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
+                    const main_token = ast.nodes.items(.main_token)[i];
+                    const builtin_name = ast.tokenSlice(main_token);
+                    if (std.mem.eql(u8, builtin_name, "@ptrCast") or std.mem.eql(u8, builtin_name, "@alignCast")) {
+                        const token_loc = ast.tokenLocation(0, main_token);
+                        try self.addDiagnostic(file_path, .RawPattern, "raw unsafe cast detected; consider using safe types for type-safe conversions", @intCast(token_loc.line), @intCast(token_loc.column));
+                    }
+                },
+                else => {},
+            }
         }
     }
 
@@ -1185,7 +1281,18 @@ pub const Analyzer = struct {
                         var_state.is_read = true;
                         if (var_state.null_status == .null) {
                             const token_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(node)]);
-                            try self.addDiagnostic(file_path, .NullDereference, "null pointer dereference", @intCast(token_loc.line), @intCast(token_loc.column));
+                            var replacements = try self.gpa.alloc(Diagnostic.Replacement, 1);
+                            replacements[0] = .{
+                                .start_line = @intCast(token_loc.line),
+                                .start_col = 0,
+                                .end_line = @intCast(token_loc.line),
+                                .end_col = 999,
+                                .new_text = "opt orelse return error.NullValue",
+                            };
+                            try self.addDiagnosticWithFix(file_path, .NullDereference, "null pointer dereference", @intCast(token_loc.line), @intCast(token_loc.column), .{
+                                .description = "Add null check",
+                                .replacements = replacements,
+                            });
                         }
                     }
                 }
@@ -1346,7 +1453,8 @@ pub const Analyzer = struct {
                 .AlreadySent,
                 .InvalidMove,
                 .NullDereference,
-                .BufferOverflow => true,
+                .BufferOverflow,
+                .RawPattern => true,
                 else => false,
             },
             .Medium => switch (kind) {
@@ -1368,8 +1476,8 @@ pub const Analyzer = struct {
                 .InvalidMove,
                 .StdAlternative,
                 .NullDereference,
-                .BufferOverflow => true,
-                else => false,
+                .BufferOverflow,
+                .RawPattern => true,
             },
             .High => true,
         };
@@ -1390,6 +1498,18 @@ pub const Analyzer = struct {
         line: u32,
         col: u32,
     ) AnalyzeError!void {
+        try self.addDiagnosticWithFix(file_path, kind, message, line, col, null);
+    }
+
+    fn addDiagnosticWithFix(
+        self: *Analyzer,
+        file_path: []const u8,
+        kind: Diagnostic.DiagnosticKind,
+        message: []const u8,
+        line: u32,
+        col: u32,
+        fix: ?Diagnostic.Fix,
+    ) AnalyzeError!void {
         if (!self.shouldReport(kind)) return;
         try self.diagnostics.append(self.gpa, .{
             .kind = kind,
@@ -1405,6 +1525,7 @@ pub const Analyzer = struct {
                 .MemoryLeak, .StdAlternative => .Warning,
                 else => .Warning,
             },
+            .fix = fix,
         });
     }
 
@@ -1507,14 +1628,9 @@ pub const Analyzer = struct {
             if (!self.variables.contains(name)) {
                 // Variable only in then branch: add to merged state as possibly uninitialized
                 const name_copy = try self.gpa.dupe(u8, name);
-                try self.variables.put(name_copy, .{
-                    .name = name_copy,
-                    .is_box = entry.value_ptr.is_box,
-                    .is_live = entry.value_ptr.is_live,
-                    .origin = entry.value_ptr.origin,
-                    .decl_line = entry.value_ptr.decl_line,
-                    .decl_col = entry.value_ptr.decl_col,
-                });
+                var state_copy = entry.value_ptr.*;
+                state_copy.name = name_copy;
+                try self.variables.put(name_copy, state_copy);
             }
         }
     }
@@ -2055,6 +2171,32 @@ fn isThreadSpawnCall(ast: *const std.zig.Ast, node: zig.Ast.Node.Index) bool {
 fn isZustInitCall(ast: *const std.zig.Ast, node: zig.Ast.Node.Index) bool {
     const unwrapped = unwrapNode(ast, node);
     return detectZustInit(ast, unwrapped) != null;
+}
+
+fn isStdResourceInit(ast: *const std.zig.Ast, init_expr: zig.Ast.Node.Index) bool {
+    const unwrapped = unwrapNode(ast, init_expr);
+    const tag = ast.nodes.items(.tag)[@intFromEnum(unwrapped)];
+    if (tag != .call and tag != .call_one and tag != .call_comma and tag != .call_one_comma) return false;
+
+    const callee = getCallee(ast, unwrapped);
+    const method = getMethodName(ast, callee) orelse return false;
+
+    const resource_methods = &[_][]const u8{
+        "openFile", "createFile", "openDir", "connect", "accept", "socket", "open",
+    };
+    for (resource_methods) |m| {
+        if (std.mem.eql(u8, method, m)) return true;
+    }
+    return false;
+}
+
+fn isRawCreateCall(ast: *const std.zig.Ast, init_expr: zig.Ast.Node.Index) bool {
+    const unwrapped = unwrapNode(ast, init_expr);
+    const tag = ast.nodes.items(.tag)[@intFromEnum(unwrapped)];
+    if (tag != .call and tag != .call_one and tag != .call_comma and tag != .call_one_comma) return false;
+
+    const callee = getCallee(ast, unwrapped);
+    return isFieldAccess(ast, callee, "create");
 }
 
 fn getIntLiteralValue(ast: *const std.zig.Ast, node: zig.Ast.Node.Index) ?u32 {
