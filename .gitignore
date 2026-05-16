@@ -1,0 +1,31 @@
+# Build artifacts
+.zig-cache/
+zig-out/
+
+# Node.js
+node_modules/
+package-lock.json
+*.js.map
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Test artifacts
+double_free_test
+*.log
+
+# Build helper artifacts (if any)
+build_helper.zig

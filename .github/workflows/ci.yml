@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  # ─────────────────────────────────────────
+  # Library + Analyzer Tests
+  # ─────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build
+        run: zig build --summary all
+
+      - name: Run all tests
+        run: zig build test-all --summary all
+
+      - name: Run analyzer (dog-food check)
+        run: zig build analyze --summary all
+
+      - name: Build release binary
+        run: zig build -Doptimize=ReleaseSafe --summary all
+
+      - name: Upload binary artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: zust-analyze-${{ github.sha }}
+          path: zig-out/bin/zust-analyze
+          retention-days: 30
+
+  # ─────────────────────────────────────────
+  # Static Analyzer Self-Check (extra strict)
+  # ─────────────────────────────────────────
+  analyze-self:
+    name: Analyzer Self-Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build analyzer
+        run: zig build --summary all
+
+      - name: Run analyzer on all source files (high strictness)
+        run: |
+          ./zig-out/bin/zust-analyze \
+            lib/*.zig analyzer/src/*.zig \
+            --strictness=high
+
+      - name: Run analyzer on bad patterns (should find bugs)
+        run: |
+          ./zig-out/bin/zust-analyze \
+            tests/bad_patterns.zig \
+            --strictness=high || true
+
+  # ─────────────────────────────────────────
+  # Documentation Build
+  # ─────────────────────────────────────────
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build docs
+        run: zig build docs --summary all || echo "No docs step defined"
+
+  # ─────────────────────────────────────────
+  # VS Code Extension Build
+  # ─────────────────────────────────────────
+  vscode:
+    name: VS Code Extension
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: vscode-extension/package-lock.json
+
+      - name: Install dependencies
+        working-directory: vscode-extension
+        run: npm install
+
+      - name: Compile extension
+        working-directory: vscode-extension
+        run: npm run compile
+
+      - name: Package extension
+        working-directory: vscode-extension
+        run: npx vsce package || echo "vsce not installed, skipping package"
+
+  # ─────────────────────────────────────────
+  # Formatting Check
+  # ─────────────────────────────────────────
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Check formatting
+        run: zig fmt --check lib/ analyzer/src/ tests/

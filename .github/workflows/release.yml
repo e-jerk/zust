@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  # ─────────────────────────────────────────
+  # Build release binaries for all platforms
+  # ─────────────────────────────────────────
+  build:
+    name: Build Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux
+          - os: macos-latest
+            target: aarch64-macos
+          - os: macos-13
+            target: x86_64-macos
+          - os: windows-latest
+            target: x86_64-windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build release binary
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp zig-out/bin/zust-analyze dist/zust-analyze-${{ matrix.target }}
+          chmod +x dist/zust-analyze-${{ matrix.target }}
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item zig-out/bin/zust-analyze.exe dist/zust-analyze-${{ matrix.target }}.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zust-analyze-${{ matrix.target }}
+          path: dist/*
+          retention-days: 5
+
+  # ─────────────────────────────────────────
+  # Create GitHub Release
+  # ─────────────────────────────────────────
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## zust Release ${{ github.ref_name }}
+
+            ### What is zust?
+            Zero-cost ownership and memory safety for Zig via comptime typestate.
+
+            ### Binaries
+            - `zust-analyze-x86_64-linux` — Linux x86_64
+            - `zust-analyze-aarch64-macos` — macOS Apple Silicon
+            - `zust-analyze-x86_64-macos` — macOS Intel
+            - `zust-analyze-x86_64-windows.exe` — Windows x86_64
+
+            ### Usage
+            ```bash
+            ./zust-analyze <file.zig> [options]
+            ./zust-analyze --lsp  # LSP server mode
+            ```
+
+            ### Installation
+            Download the binary for your platform and place it on your PATH.

@@ -1,0 +1,67 @@
+{
+  "name": "zust",
+  "displayName": "zust",
+  "description": "Memory safety analysis for Zig via zust LSP server",
+  "version": "0.1.0",
+  "publisher": "zust",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "zig",
+    "memory-safety",
+    "ownership",
+    "borrow-checker"
+  ],
+  "activationEvents": [
+    "onLanguage:zig"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "zust",
+      "properties": {
+        "zust.serverPath": {
+          "type": "string",
+          "default": "zust-analyzer",
+          "description": "Path to the zust analyzer executable (or command name if on PATH)"
+        },
+        "zust.strictness": {
+          "type": "string",
+          "enum": [
+            "Low",
+            "Medium",
+            "High"
+          ],
+          "default": "Medium",
+          "description": "Analysis strictness level"
+        },
+        "zust.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable zust analysis"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.74.0",
+    "typescript": "^5.0.0",
+    "vsce": "^2.15.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
+  }
+}
