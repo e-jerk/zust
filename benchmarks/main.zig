@@ -7,10 +7,10 @@ const Benchmark = struct {
     func: *const fn (std.mem.Allocator) anyerror!void,
 };
 
-var timer: std.time.Timer = undefined;
-
 fn nanoTimestamp() i128 {
-    return @intCast(timer.read());
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * 1_000_000_000 + @as(i128, ts.nsec);
 }
 
 fn runBenchmark(b: Benchmark, allocator: std.mem.Allocator) !i128 {
@@ -926,8 +926,6 @@ fn benchmarkSimdEqlIgnoreCase(_: std.mem.Allocator) !void {
 // ─── Main ───
 
 pub fn main() !void {
-    timer = try std.time.Timer.start();
-
     var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
