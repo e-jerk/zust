@@ -210,6 +210,37 @@ pub fn build(b: *std.Build) void {
     const bench_run = b.addRunArtifact(bench_exe);
     bench_step.dependOn(&bench_run.step);
 
+    // Transpiler executable
+    const transpiler_mod = b.createModule(.{
+        .root_source_file = b.path("tools/transpiler.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    transpiler_mod.addImport("safe", safe_module);
+    const transpiler_exe = b.addExecutable(.{
+        .name = "zust-transpile",
+        .root_module = transpiler_mod,
+    });
+    b.installArtifact(transpiler_exe);
+
+    // Transpiler tests
+    const transpiler_test_step = b.step("test-transpiler", "Run transpiler tests");
+    const transpiler_test_mod = b.createModule(.{
+        .root_source_file = b.path("tools/transpiler.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    transpiler_test_mod.addImport("safe", safe_module);
+    const transpiler_tests = b.addTest(.{
+        .name = "transpiler_tests",
+        .root_module = transpiler_test_mod,
+    });
+    transpiler_test_step.dependOn(&b.addRunArtifact(transpiler_tests).step);
+
+    // Transpiler build step
+    const transpile_step = b.step("transpile", "Build transpiler tool");
+    transpile_step.dependOn(&b.addInstallArtifact(transpiler_exe, .{}).step);
+
     // Optional: make `zig build` also run the analyzer (uncomment to enable)
     // b.getInstallStep().dependOn(analyze_step);
 }
