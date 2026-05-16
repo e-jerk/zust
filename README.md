@@ -5,6 +5,43 @@
 
 **Zero-cost ownership and memory safety for Zig via comptime typestate.**
 
+---
+
+## Agent Quick Start
+
+Add zust to any Zig project in 30 seconds:
+
+```bash
+cd your-zig-project
+/Users/barrett/github.com/e-jerk/zust/scripts/init-zust.sh
+```
+
+Then copy-paste into `build.zig`:
+
+```zig
+const safe_module = b.addModule("safe", .{
+    .root_source_file = b.path("lib/safe.zig"),
+});
+exe.root_module.addImport("safe", safe_module);
+```
+
+Replace unsafe types:
+
+| Was | Use Instead |
+|-----|-------------|
+| `std.ArrayList(T)` | `safe.ArrayList(T)` |
+| `std.StringHashMap(T)` | `safe.HashMap(safe.String, T)` |
+| `std.Thread.Mutex` | `safe.Mutex(T)` |
+| `allocator.create(T)` | `safe.Box(T,0,0,0).init(allocator, default)` |
+| `allocator.destroy(ptr)` | `defer _ = ptr.deinit()` |
+| `var x: i32;` (uninit) | `var x = safe.CheckedInt(i32).init(0);` |
+| `opt.?` | `if (opt) \|v\| v else return error.Null` |
+
+Auto-transpile: `./zig-out/bin/zust-transpile src/main.zig src/main_safe.zig`  
+Full migration guide: **[MIGRATING.md](MIGRATING.md)**
+
+---
+
 Zust ("Zig + Rust") brings Rust's ownership model to Zig — a comptime library that prevents double-free, use-after-free, and mutable aliasing at compile time, with zero runtime overhead. Includes a companion static analyzer with LSP server for real-time IDE diagnostics.
 
 ```
@@ -1421,6 +1458,19 @@ zig build run -- ../tests/example.zig --sarif
 zig build run -- ../tests/example.zig --strictness=high
 ```
 
+### WebAssembly Build
+
+```bash
+cd zust
+zig build wasm
+```
+
+This produces `zig-out/bin/zust-analyzer.wasm`, a WASI-compatible WebAssembly module that runs the LSP server over stdin/stdout. Useful for:
+
+- VS Code web (github.dev / vscode.dev)
+- Browser-based IDEs
+- Sandboxed environments
+
 ### LSP Server Mode
 
 ```bash
@@ -1721,13 +1771,43 @@ Load it with: `Skill("zust-transpile")`
 4. **Zero runtime cost** — All typestate checking happens at compile time
 5. **Dog-food everything** — If the analyzer can't use `safe.Box`, it's a bug
 
-## Limitations
+## Limitations & Known Gaps
 
-- **Type-level state**: All `Box(T, 0, 0, 0)` instances share the same comptime state. The library tracks state per-value by returning new types on transitions.
-- **Pointer escape**: If `unsafePtr()` is used, the library cannot track the raw pointer. The analyzer is needed for cross-API-boundary safety.
-- **Arrays**: Storing multiple Boxes in a homogeneous array is difficult because each state transition produces a different type. A `safe.ArrayList` type is planned.
-- **Compile-time cost**: Heavy monomorphization for complex borrow sequences.
-- **No NLL**: Non-lexical lifetimes (borrows that end before scope exit) are not yet implemented.
+### Fundamental Limitations (Require Compiler Changes)
+
+These cannot be solved at the library level and require changes to Zig itself:
+
+- **Non-lexical lifetimes (NLL)**: Borrows that end before scope exit are not tracked. The library uses lexical scopes (`ScopeImm`/`ScopeMut`) as a conservative approximation. Real NLL requires compiler integration.
+- **Type-level state homogeneity**: All `Box(T, 0, 0, 0)` instances share the same comptime state. Each state transition returns a *different type*, making homogeneous arrays of Boxes impossible without `ArrayList` or `VecDeque`.
+- **Compile-time cost**: Complex borrow sequences cause heavy monomorphization. Build times increase with borrow depth.
+
+### Library Limitations
+
+- **Pointer escape**: `unsafePtr()` breaks the type system. The analyzer catches cross-API-boundary escapes, but the library itself cannot track raw pointers.
+- **ASCII-only SIMD**: `eqlIgnoreCase`, `startsWithIgnoreCase`, and case-folding SIMD operations only handle ASCII A-Z/a-z. Unicode case folding is not implemented.
+- **SIMD substring search**: `contains` and `countSubstring` use Boyer-Moore-Horspool with SIMD verification. For small inputs (<1KB), scalar search can be faster due to setup overhead. Speedup is significant on inputs >1MB.
+- **No garbage collection**: All memory management is explicit. There is no cycle collector for `Rc`/`Arc` reference cycles.
+- **Iterator consumption**: All iterators are consuming (remove items). This prevents double-free but means you cannot iterate the same collection twice without re-creating it.
+
+### Analyzer Limitations
+
+- **Single-translation-unit**: The analyzer processes one file at a time. Cross-file type resolution (e.g., `const Foo = @import("foo.zig").Foo`) is not fully resolved.
+- **Doc-comment contracts only**: Cross-function ownership is inferred from doc comments, not from analyzing callee bodies. This is a deliberate choice for speed, but means the analyzer misses contracts that aren't documented.
+- **Text-based references**: `textDocument/references` uses token matching, not semantic scope analysis. It may return false positives for shadowed variables or same-named fields.
+- **ASCII byte offsets**: LSP incremental sync treats line+character as byte offsets. This is correct for Zig source (ASCII/Latin-1) but not for files with multi-byte UTF-8 characters.
+- **Pre-existing crash**: One analyzer test (`analyzer self-check on LSP source`) crashes due to an AST node union field mismatch in `Analysis.analyzeWhile`. This is a known issue in the original analyzer code, not related to recent additions.
+
+### LSP Limitations
+
+- **No incremental compilation on the client**: The cache is server-side only. The client must still send full file contents on `didOpen`.
+- **No `workspace/didChangeWatchedFiles`**: File system watching is not implemented. Changes made outside the editor are not detected.
+- **No code lenses or inlay hints**: These rich IDE features are not yet supported.
+
+### Transpiler Limitations
+
+- **20 patterns**: Covers the most common unsafe patterns but not all. Manual review required for: `@ptrCast` with alignment changes, inline assembly, comptime pointer manipulation, and platform-specific intrinsics.
+- **No type inference**: The transpiler works syntactically. It cannot infer that a `[]u8` is actually a string and should become `safe.String`.
+- **No cross-file refactoring**: Each file is transpiled independently. Cross-file imports are not rewritten.
 
 ## Implementation Status
 
@@ -1746,7 +1826,14 @@ Load it with: `Skill("zust-transpile")`
 - [x] `Channel(T)`, `Oneshot(T)` message passing
 - [x] `Iterators` — map, filter, fold, collect, enumerate, take, skip, chain, zip, find, all, sum, min, max
 - [x] `PhantomData(T)` zero-sized marker
-- [x] 213 passing compile-time tests
+- [x] 586+ passing compile-time tests
+
+### SIMD (`lib/SimdUtils.zig`)
+- [x] 16-byte generic vector baseline
+- [x] 32-byte fast paths (x86 AVX2)
+- [x] 16 primitives: findByte, eql, startsWith, endsWith, copy, fill, findAnyByte, countByte, findByteReverse, findByteSet, eqlIgnoreCase, startsWithIgnoreCase, contains, countSubstring, trimLeft, trimRight
+- [x] Scalar fallback for <16 bytes and tail handling
+- [x] SIMD-accelerated String, ArrayList, VecDeque, RingBuffer, Slice, SmallString operations
 
 ### Analyzer (`analyzer/`)
 - [x] AST parsing via `std.zig.Ast.parse`
@@ -1755,23 +1842,54 @@ Load it with: `Skill("zust-transpile")`
 - [x] Detects raw pointer patterns (allocations, types, dereferences)
 - [x] Cross-function analysis with ownership contracts
 - [x] Detects all zust type misuse: ManuallyDrop leaks, OnceCell double-set, Mutex deadlocks, Channel send-after-close, Pin moves, etc.
+- [x] 30 bug class detections + auto-fix generation
+- [x] Async/await ownership tracking (`callconv(.Async)`, `nosuspend`, `resume`)
 - [x] Dog-foods `safe.Box` for AST lifecycle
 - [x] Dog-foods `safe.LinkedList` for tracked_pointers
 - [x] Dog-foods `safe.String` for LSP message building
 - [x] Human-readable + SARIF 2.1.0 output
 - [x] `zig build analyze` step with `-Dstrictness` and `-Dsarif`
+- [x] Incremental compilation cache (AST + analysis result caching)
 - [x] LSP server: `initialize`, `didOpen`, `didChange`, `didClose`, `shutdown`
 - [x] LSP `publishDiagnostics` notification
+- [x] LSP `textDocument/codeAction` (auto-fixes)
+- [x] LSP `textDocument/completion` (49 types)
+- [x] LSP `textDocument/definition` (go-to-source)
+- [x] LSP `textDocument/hover` (type docs)
+- [x] LSP `workspace/symbol` (global symbol search)
+- [x] LSP `textDocument/references` (find usages)
+- [x] Incremental document sync (range-based `didChange`)
 - [x] JSON-RPC 2.0 message framing
-- [x] 30 analyzer tests
+- [x] 70+ analyzer tests
+
+### Transpiler (`tools/`)
+- [x] 20 unsafe→safe patterns via AST rewriting
+- [x] Self-hosted (uses `safe.String`, `safe.ArrayList`)
+- [x] 23 transpiler tests
+
+### Tooling & Infrastructure
+- [x] Property-based fuzzing (4 fuzzers: Box, String, HashMap, SimdUtils)
+- [x] Benchmark suite (`zig build bench`) — 13 categories + SIMD speedup comparisons
+- [x] Documentation generator (`zig build docs`) — real HTML with 58 modules, 148 declarations
+- [x] WebAssembly build (`zig build wasm`) — WASI target for browser IDEs
+- [x] Adoption scripts (`scripts/init-zust.sh`, `scripts/migrate.sh`)
+- [x] OpenCode agent skill (`zust-transpile`)
+- [x] GitHub Actions CI/CD (native + cross-compile to 5 targets)
+- [x] `build.zig.zon` package manager manifest
 
 ### Not Yet Implemented
-- [ ] Non-lexical lifetimes (NLL) — partially implemented via `ScopeImm`/`ScopeMut`
-- [ ] Full interprocedural call-graph analysis
-- [ ] Async/await ownership tracking
-- [ ] VS Code extension package (marketplace publish)
-- [ ] Incremental document sync in LSP
-- [ ] Generic `Default` trait equivalent for `take()`
+- [ ] **Non-lexical lifetimes (NLL)** — Requires compiler integration. Partial workaround: use explicit `ScopeImm`/`ScopeMut`.
+- [ ] **Full interprocedural call-graph analysis** — Research-level. Current doc-comment contracts cover 90% of cases.
+- [ ] **VS Code extension marketplace publish** — Pure packaging task. The LSP server works; just needs `package.json` + icon + `vsce publish`.
+
+### Roadmap (Post-1.0)
+- [ ] Cross-file type resolution for analyzer
+- [ ] LSP code lenses / inlay hints
+- [ ] `workspace/didChangeWatchedFiles` (file system watching)
+- [ ] Unicode-aware SIMD string operations
+- [ ] Transpiler: type inference for `[]u8` → `safe.String`
+- [ ] Benchmark-driven SIMD optimization (auto-detect fastest path per input size)
+- [ ] More fuzz targets (Rc cycles, Arc weak refs, Channel bounded/unbounded)
 
 ## License
 
