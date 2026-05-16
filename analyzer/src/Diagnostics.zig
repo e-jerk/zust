@@ -24,7 +24,34 @@ pub const DiagnosticKind = enum {
     AlreadySent,      // double send on Oneshot
     InvalidMove,      // Pin value moved
     StdAlternative,   // suggest zust alternative to std type
+    NullDereference,
+    BufferOverflow,
 };
+
+pub fn displayName(kind: DiagnosticKind) []const u8 {
+    return switch (kind) {
+        .UseAfterFree => "use-after-free",
+        .DoubleFree => "double-free",
+        .UseAfterMove => "use-after-move",
+        .MutableAliasing => "mutable-aliasing",
+        .MixedBorrow => "mixed-borrow",
+        .IteratorInvalidation => "iterator-invalidation",
+        .PointerEscape => "pointer-escape",
+        .StackUseAfterReturn => "stack-use-after-return",
+        .DataRace => "data-race",
+        .RawPattern => "raw-pattern",
+        .MemoryLeak => "memory-leak",
+        .Deadlock => "deadlock",
+        .AlreadyInitialized => "already-initialized",
+        .NotInitialized => "not-initialized",
+        .ChannelClosed => "channel-closed",
+        .AlreadySent => "already-sent",
+        .InvalidMove => "invalid-move",
+        .StdAlternative => "std-alternative",
+        .NullDereference => "null-dereference",
+        .BufferOverflow => "buffer-overflow",
+    };
+}
 
 pub const Diagnostic = struct {
     kind: DiagnosticKind,

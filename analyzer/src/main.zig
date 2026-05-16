@@ -835,3 +835,82 @@ test "Analyzer detects Mutex not unlocked" {
     try analyzer.analyzeFile("test.zig", source, .Medium);
     try std.testing.expect(analyzer.hasDiagnostic(.Deadlock));
 }
+
+test "Analyzer detects memory leak" {
+    const source =
+        \\fn testLeak() void {
+        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    _ = box;
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(analyzer.hasDiagnostic(.MemoryLeak));
+}
+
+test "Analyzer detects null pointer dereference" {
+    const source =
+        \\fn testNullDeref() void {
+        \\    var opt: ?u32 = null;
+        \\    _ = opt.?;
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(analyzer.hasDiagnostic(.NullDereference));
+}
+
+test "Analyzer detects buffer overflow" {
+    const source =
+        \\fn testBufferOverflow() void {
+        \\    var arr: [3]u32 = undefined;
+        \\    _ = arr[5];
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(analyzer.hasDiagnostic(.BufferOverflow));
+}
+
+test "Analyzer detects uninitialized variable read" {
+    const source =
+        \\fn testUninit() void {
+        \\    var x: u32 = undefined;
+        \\    _ = x;
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(analyzer.hasDiagnostic(.NotInitialized));
+}
+
+test "Analyzer no false positive leak when properly freed" {
+    const source =
+        \\fn testNoLeak() void {
+        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const dead = box.deinit();
+        \\    _ = dead;
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(!analyzer.hasDiagnostic(.MemoryLeak));
+}
+
+test "Analyzer no false positive null deref on non-null optional" {
+    const source =
+        \\fn testNoNullDeref() void {
+        \\    var opt: ?u32 = 42;
+        \\    _ = opt.?;
+        \\}
+    ;
+    var analyzer = Analysis.Analyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+    try analyzer.analyzeFile("test.zig", source, .Medium);
+    try std.testing.expect(!analyzer.hasDiagnostic(.NullDereference));
+}
