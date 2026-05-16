@@ -32,3 +32,4 @@ build_helper.zig
 
 # Generated docs (built in CI)
 docs/index.html
+test_*
