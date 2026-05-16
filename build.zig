@@ -180,6 +180,20 @@ pub fn build(b: *std.Build) void {
     const http_step = b.step("http-example", "Build HTTP server example");
     http_step.dependOn(&b.addInstallArtifact(http_example, .{}).step);
 
+    // JSON parser example
+    const json_example_mod = b.createModule(.{
+        .root_source_file = b.path("examples/json_parser.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    json_example_mod.addImport("safe", safe_module);
+    const json_example = b.addExecutable(.{
+        .name = "json_parser",
+        .root_module = json_example_mod,
+    });
+    const json_step = b.step("json-example", "Build JSON parser example");
+    json_step.dependOn(&b.addInstallArtifact(json_example, .{}).step);
+
     // Benchmark suite
     const bench_step = b.step("bench", "Run benchmarks");
     const bench_mod = b.createModule(.{
