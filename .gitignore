@@ -29,3 +29,6 @@ double_free_test
 
 # Build helper artifacts (if any)
 build_helper.zig
+
+# Generated docs (built in CI)
+docs/index.html
