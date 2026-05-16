@@ -70,6 +70,7 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("lib/LinkedList.zig"));
     run_analyzer.addFileArg(b.path("lib/ArrayList.zig"));
     run_analyzer.addFileArg(b.path("lib/Arc.zig"));
+    run_analyzer.addFileArg(b.path("lib/Arena.zig"));
     run_analyzer.addFileArg(b.path("lib/Mutex.zig"));
     run_analyzer.addFileArg(b.path("lib/Slice.zig"));
     run_analyzer.addFileArg(b.path("lib/Scope.zig"));
@@ -91,6 +92,9 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("lib/UnsafeCell.zig"));
     run_analyzer.addFileArg(b.path("lib/PhantomData.zig"));
     run_analyzer.addFileArg(b.path("lib/VecDeque.zig"));
+    run_analyzer.addFileArg(b.path("lib/Allocator.zig"));
+    run_analyzer.addFileArg(b.path("lib/Lifetime.zig"));
+    run_analyzer.addFileArg(b.path("lib/TaggedUnion.zig"));
     run_analyzer.addFileArg(b.path("lib/safe.zig"));
     // Analyzer files
     run_analyzer.addFileArg(b.path("analyzer/src/Analysis.zig"));

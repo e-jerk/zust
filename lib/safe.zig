@@ -21,6 +21,8 @@ pub const Cell = @import("Cell.zig").Cell;
 pub const RefCell = @import("Cell.zig").RefCell;
 pub const Ref = @import("Cell.zig").Ref;
 pub const RefMut = @import("Cell.zig").RefMut;
+pub const Arena = @import("Arena.zig").Arena;
+pub const ArenaBox = @import("Arena.zig").ArenaBox;
 pub const VecDeque = @import("VecDeque.zig").VecDeque;
 pub const String = @import("String.zig").String;
 pub const Cow = @import("Cow.zig").Cow;
@@ -38,6 +40,26 @@ pub const UnsafeCell = @import("UnsafeCell.zig").UnsafeCell;
 pub const PhantomData = @import("PhantomData.zig").PhantomData;
 pub const Channel = @import("Channel.zig").Channel;
 pub const Oneshot = @import("Channel.zig").Oneshot;
+pub const ZustAllocator = @import("Allocator.zig").ZustAllocator;
+pub const TrackingAllocator = @import("Allocator.zig").TrackingAllocator;
+pub const wrap = @import("Allocator.zig").wrap;
+comptime { _ = ZustAllocator; }
+pub const SendSync = @import("SendSync.zig");
+comptime { _ = SendSync; }
+pub const StackRef = @import("Lifetime.zig").StackRef;
+pub const ScopeGuard = @import("Lifetime.zig").ScopeGuard;
+pub const ScopeId = @import("Lifetime.zig").ScopeId;
+pub const enterScope = @import("Lifetime.zig").enterScope;
+pub const currentScope = @import("Lifetime.zig").currentScope;
+pub const NonNull = @import("Lifetime.zig").NonNull;
+pub const TaggedUnion2 = @import("TaggedUnion.zig").TaggedUnion2;
+pub const TaggedUnion3 = @import("TaggedUnion.zig").TaggedUnion3;
+pub const Result = @import("TaggedUnion.zig").Result;
+pub const Option = @import("TaggedUnion.zig").Option;
+pub const FileGuard = @import("Resources.zig").FileGuard;
+pub const DirGuard = @import("Resources.zig").DirGuard;
+pub const MappedFileGuard = @import("Resources.zig").MappedFileGuard;
+pub const ArenaGuard = @import("Resources.zig").ArenaGuard;
 
 test "Box init and deinit" {
     const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
@@ -1836,5 +1858,93 @@ test "HashMap isEmpty" {
 
     try std.testing.expect(!map.isEmpty());
     try std.testing.expectEqual(map.len(), 1);
+}
+
+// === TaggedUnion Tests ===
+
+test "TaggedUnion2 basic usage" {
+    const MyUnion = TaggedUnion2(i32, f64);
+    var u = MyUnion.initA(42);
+    try std.testing.expect(u.isA());
+    try std.testing.expect(!u.isB());
+    try std.testing.expectEqual(u.asA().*, 42);
+
+    u.asA().* = 100;
+    try std.testing.expectEqual(u.asA().*, 100);
+    try std.testing.expectEqual(u.asAConst().*, 100);
+
+    var v = MyUnion.initB(3.14);
+    try std.testing.expect(v.isB());
+    try std.testing.expect(!v.isA());
+    try std.testing.expectEqual(v.asB().*, 3.14);
+    try std.testing.expectEqual(v.asBConst().*, 3.14);
+}
+
+test "TaggedUnion2 wrong field panics" {
+    var u = TaggedUnion2(i32, f64).initA(42);
+    try std.testing.expect(!u.isB());
+    // This would panic at runtime:
+    // u.asB();
+}
+
+test "TaggedUnion3 with three types" {
+    const MyUnion = TaggedUnion3(i32, f64, []const u8);
+    var u = MyUnion.initA(1);
+    try std.testing.expect(u.isA());
+    try std.testing.expectEqual(u.asA().*, 1);
+
+    var v = MyUnion.initB(2.71);
+    try std.testing.expect(v.isB());
+    try std.testing.expectEqual(v.asB().*, 2.71);
+
+    var w = MyUnion.initC("hello");
+    try std.testing.expect(w.isC());
+    try std.testing.expectEqualStrings(w.asC().*, "hello");
+    try std.testing.expectEqualStrings(w.asCConst().*, "hello");
+}
+
+test "Result ok and err" {
+    const MyResult = Result(i32, []const u8);
+
+    var ok_res = MyResult.ok(42);
+    try std.testing.expect(ok_res.isOk());
+    try std.testing.expect(!ok_res.isErr());
+    try std.testing.expectEqual(ok_res.unwrap().*, 42);
+    try std.testing.expectEqual(ok_res.unwrapConst().*, 42);
+
+    var err_res = MyResult.err("failure");
+    try std.testing.expect(err_res.isErr());
+    try std.testing.expect(!err_res.isOk());
+    try std.testing.expectEqualStrings(err_res.unwrapErr().*, "failure");
+    try std.testing.expectEqualStrings(err_res.unwrapErrConst().*, "failure");
+}
+
+test "Result unwrap" {
+    var ok_res = Result(i32, []const u8).ok(100);
+    try std.testing.expectEqual(ok_res.unwrap().*, 100);
+
+    var err_res = Result(i32, []const u8).err("oops");
+    try std.testing.expect(err_res.isErr());
+    // This would panic at runtime:
+    // err_res.unwrap();
+}
+
+test "Option some and none" {
+    const MyOption = Option(i32);
+
+    var some_opt = MyOption.some(42);
+    try std.testing.expect(some_opt.isSome());
+    try std.testing.expect(!some_opt.isNone());
+    try std.testing.expectEqual(some_opt.unwrap().*, 42);
+    try std.testing.expectEqual(some_opt.unwrapConst().*, 42);
+    try std.testing.expectEqual(some_opt.unwrapOr(0), 42);
+
+    var none_opt = MyOption.none();
+    try std.testing.expect(none_opt.isNone());
+    try std.testing.expect(!none_opt.isSome());
+    try std.testing.expectEqual(none_opt.unwrapOr(99), 99);
+
+    // This would panic at runtime:
+    // none_opt.unwrap();
 }
 
