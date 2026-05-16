@@ -775,80 +775,77 @@ pub const Analyzer = struct {
             const base_var = getCallBaseVar(ast, node);
             const token_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(node)]);
 
+            const mk = methodKindFromName(method);
+
             // Type-specific method checks
             if (self.variables.getPtr(base_var)) |var_state| {
                 switch (var_state.type_category) {
-                    .ManuallyDrop => {
-                        if (std.mem.eql(u8, method, "drop")) {
-                            var_state.is_dropped = true;
-                        } else if (std.mem.eql(u8, method, "take")) {
-                            var_state.is_dropped = true;
-                        }
+                    .ManuallyDrop => switch (mk) {
+                        .drop, .take => var_state.is_dropped = true,
+                        else => {},
                     },
-                    .OnceCell, .OnceBox => {
-                        if (std.mem.eql(u8, method, "set")) {
+                    .OnceCell, .OnceBox => switch (mk) {
+                        .set => {
                             if (var_state.is_initialized) {
                                 try self.addDiagnostic(file_path, .AlreadyInitialized, "double set on OnceCell; use getOrInit() for idempotent initialization", @intCast(token_loc.line), @intCast(token_loc.column));
                             }
                             var_state.is_initialized = true;
-                        } else if (std.mem.eql(u8, method, "get")) {
+                        },
+                        .get => {
                             if (!var_state.is_initialized) {
                                 try self.addDiagnostic(file_path, .NotInitialized, "reading uninitialized OnceCell; initialize with set() or use LazyCell", @intCast(token_loc.line), @intCast(token_loc.column));
                             }
-                        }
+                        },
+                        else => {},
                     },
-                    .MaybeUninit => {
-                        if (std.mem.eql(u8, method, "assumeInit")) {
+                    .MaybeUninit => switch (mk) {
+                        .assumeInit => {
                             if (!var_state.is_initialized) {
                                 try self.addDiagnostic(file_path, .NotInitialized, "calling assumeInit() on uninitialized MaybeUninit; call write() first", @intCast(token_loc.line), @intCast(token_loc.column));
                             }
-                        } else if (std.mem.eql(u8, method, "write")) {
-                            var_state.is_initialized = true;
-                        }
+                        },
+                        .write => var_state.is_initialized = true,
+                        else => {},
                     },
-                    .Channel => {
-                        if (std.mem.eql(u8, method, "close")) {
-                            var_state.is_closed = true;
-                        } else if (std.mem.eql(u8, method, "send")) {
+                    .Channel => switch (mk) {
+                        .close => var_state.is_closed = true,
+                        .send => {
                             if (var_state.is_closed) {
                                 try self.addDiagnostic(file_path, .ChannelClosed, "sending to closed Channel", @intCast(token_loc.line), @intCast(token_loc.column));
                             }
-                        }
+                        },
+                        else => {},
                     },
-                    .Oneshot => {
-                        if (std.mem.eql(u8, method, "send")) {
+                    .Oneshot => switch (mk) {
+                        .send => {
                             if (var_state.is_sent) {
                                 try self.addDiagnostic(file_path, .AlreadySent, "double send on Oneshot; can only send once", @intCast(token_loc.line), @intCast(token_loc.column));
                             }
                             var_state.is_sent = true;
-                        }
+                        },
+                        else => {},
                     },
-                    .Mutex, .RwLock => {
-                        if (std.mem.eql(u8, method, "lock") or std.mem.eql(u8, method, "readLock") or std.mem.eql(u8, method, "writeLock")) {
+                    .Mutex, .RwLock => switch (mk) {
+                        .lock, .readLock, .writeLock => {
                             if (var_state.is_locked) {
                                 try self.addDiagnostic(file_path, .Deadlock, "locking an already-locked Mutex/RwLock; potential deadlock", @intCast(token_loc.line), @intCast(token_loc.column));
                             }
                             var_state.is_locked = true;
-                        } else if (std.mem.eql(u8, method, "unlock") or std.mem.eql(u8, method, "readUnlock") or std.mem.eql(u8, method, "writeUnlock")) {
-                            var_state.is_locked = false;
-                        }
+                        },
+                        .unlock, .readUnlock, .writeUnlock => var_state.is_locked = false,
+                        else => {},
                     },
                     else => {},
                 }
             }
 
-            if (std.mem.eql(u8, method, "deinit")) {
-                try self.checkDeinit(file_path, ast, node);
-            } else if (std.mem.eql(u8, method, "unsafePtr")) {
-                // unsafePtr() call - no immediate issue, but track the result
-            } else if (std.mem.eql(u8, method, "borrowMut")) {
-                // borrowMut - library catches this at compile time, but we track too
-            } else if (std.mem.eql(u8, method, "destroy")) {
-                // allocator.destroy(ptr)
-                try self.checkDestroy(file_path, ast, node);
-            } else if (std.mem.eql(u8, method, "create")) {
-                // allocator.create(T) - suggest using safe.Box
-                try self.checkRawCreate(file_path, ast, node);
+            switch (mk) {
+                .deinit => try self.checkDeinit(file_path, ast, node),
+                .unsafePtr => {},
+                .borrowMut => {},
+                .destroy => try self.checkDestroy(file_path, ast, node),
+                .create => try self.checkRawCreate(file_path, ast, node),
+                else => {},
             }
         } else {
             // Regular function call - check if any args are dangling pointers
@@ -1334,6 +1331,41 @@ pub const Analyzer = struct {
     }
 };
 
+const MethodKind = enum {
+    drop,
+    take,
+    deinit,
+    unsafePtr,
+    borrowMut,
+    destroy,
+    create,
+    set,
+    get,
+    assumeInit,
+    write,
+    close,
+    send,
+    lock,
+    readLock,
+    writeLock,
+    unlock,
+    readUnlock,
+    writeUnlock,
+    none,
+};
+
+fn methodKindFromName(name: []const u8) MethodKind {
+    const names = &[_][]const u8{
+        "drop", "take", "deinit", "unsafePtr", "borrowMut", "destroy", "create",
+        "set", "get", "assumeInit", "write", "close", "send",
+        "lock", "readLock", "writeLock", "unlock", "readUnlock", "writeUnlock",
+    };
+    for (names, 0..) |n, i| {
+        if (safe.SimdUtils.eql(name, n)) return @enumFromInt(i);
+    }
+    return .none;
+}
+
 // ─── AST Helpers ───
 
 fn unwrapNode(ast: *const std.zig.Ast, node: zig.Ast.Node.Index) zig.Ast.Node.Index {
@@ -1510,32 +1542,36 @@ fn detectZustInit(ast: *const std.zig.Ast, init_expr: zig.Ast.Node.Index) ?TypeC
         else => {},
     }
 
-    if (std.mem.eql(u8, type_name, "Box")) return .Box;
-    if (std.mem.eql(u8, type_name, "Rc")) return .Rc;
-    if (std.mem.eql(u8, type_name, "Arc")) return .Arc;
-    if (std.mem.eql(u8, type_name, "Weak")) return .Weak;
-    if (std.mem.eql(u8, type_name, "Mutex")) return .Mutex;
-    if (std.mem.eql(u8, type_name, "RwLock")) return .RwLock;
-    if (std.mem.eql(u8, type_name, "Cell")) return .Cell;
-    if (std.mem.eql(u8, type_name, "RefCell")) return .RefCell;
-    if (std.mem.eql(u8, type_name, "ManuallyDrop")) return .ManuallyDrop;
-    if (std.mem.eql(u8, type_name, "MaybeUninit")) return .MaybeUninit;
-    if (std.mem.eql(u8, type_name, "Pin")) return .Pin;
-    if (std.mem.eql(u8, type_name, "OnceCell")) return .OnceCell;
-    if (std.mem.eql(u8, type_name, "LazyCell")) return .LazyCell;
-    if (std.mem.eql(u8, type_name, "OnceBox")) return .OnceBox;
-    if (std.mem.eql(u8, type_name, "Channel")) return .Channel;
-    if (std.mem.eql(u8, type_name, "Oneshot")) return .Oneshot;
-    if (std.mem.eql(u8, type_name, "String")) return .String;
-    if (std.mem.eql(u8, type_name, "HashMap")) return .HashMap;
-    if (std.mem.eql(u8, type_name, "BTreeMap")) return .BTreeMap;
-    if (std.mem.eql(u8, type_name, "HashSet")) return .HashSet;
-    if (std.mem.eql(u8, type_name, "BinaryHeap")) return .BinaryHeap;
-    if (std.mem.eql(u8, type_name, "VecDeque")) return .VecDeque;
-    if (std.mem.eql(u8, type_name, "LinkedList")) return .LinkedList;
-    if (std.mem.eql(u8, type_name, "ArrayList")) return .ArrayList;
-    if (std.mem.eql(u8, type_name, "UnsafeCell")) return .UnsafeCell;
-
+    const type_table = &[_]struct { []const u8, TypeCategory }{
+        .{ "Box", .Box },
+        .{ "Rc", .Rc },
+        .{ "Arc", .Arc },
+        .{ "Weak", .Weak },
+        .{ "Mutex", .Mutex },
+        .{ "RwLock", .RwLock },
+        .{ "Cell", .Cell },
+        .{ "RefCell", .RefCell },
+        .{ "ManuallyDrop", .ManuallyDrop },
+        .{ "MaybeUninit", .MaybeUninit },
+        .{ "Pin", .Pin },
+        .{ "OnceCell", .OnceCell },
+        .{ "LazyCell", .LazyCell },
+        .{ "OnceBox", .OnceBox },
+        .{ "Channel", .Channel },
+        .{ "Oneshot", .Oneshot },
+        .{ "String", .String },
+        .{ "HashMap", .HashMap },
+        .{ "BTreeMap", .BTreeMap },
+        .{ "HashSet", .HashSet },
+        .{ "BinaryHeap", .BinaryHeap },
+        .{ "VecDeque", .VecDeque },
+        .{ "LinkedList", .LinkedList },
+        .{ "ArrayList", .ArrayList },
+        .{ "UnsafeCell", .UnsafeCell },
+    };
+    for (type_table) |entry| {
+        if (safe.SimdUtils.eql(type_name, entry.@"0")) return entry.@"1";
+    }
     return null;
 }
 
