@@ -1,5 +1,6 @@
 const std = @import("std");
 const Box = @import("Box.zig").Box;
+const SimdUtils = @import("SimdUtils.zig");
 
 /// A growable array that owns `Box(T, 0, 0, 0)` values.
 /// All items are stored in Owned state. Accessing an item borrows it
@@ -63,8 +64,15 @@ pub fn ArrayList(comptime T: type) type {
             // Remove the item from the list so the list no longer owns it
             const box = self.items.items[index];
             // Shift remaining items left
-            for (index..self.items.items.len - 1) |i| {
-                self.items.items[i] = self.items.items[i + 1];
+            const shift_len = self.items.items.len - index - 1;
+            if (@sizeOf(T) == 1 and shift_len >= 16) {
+                const src = @as([*]u8, @ptrCast(&self.items.items[index + 1]));
+                const dst = @as([*]u8, @ptrCast(&self.items.items[index]));
+                SimdUtils.copy(dst[0..shift_len], src[0..shift_len]);
+            } else {
+                for (index..self.items.items.len - 1) |i| {
+                    self.items.items[i] = self.items.items[i + 1];
+                }
             }
             _ = self.items.pop();
             return box;
@@ -119,8 +127,15 @@ pub fn ArrayList(comptime T: type) type {
             }
             if (self.items.items.len == 0) return null;
             const box = self.items.items[0];
-            for (0..self.items.items.len - 1) |i| {
-                self.items.items[i] = self.items.items[i + 1];
+            const shift_len = self.items.items.len - 1;
+            if (@sizeOf(T) == 1 and shift_len >= 16) {
+                const src = @as([*]u8, @ptrCast(&self.items.items[1]));
+                const dst = @as([*]u8, @ptrCast(&self.items.items[0]));
+                SimdUtils.copy(dst[0..shift_len], src[0..shift_len]);
+            } else {
+                for (0..self.items.items.len - 1) |i| {
+                    self.items.items[i] = self.items.items[i + 1];
+                }
             }
             _ = self.items.pop();
             return box;
