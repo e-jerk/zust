@@ -135,6 +135,8 @@ pub const Server = struct {
             "textDocument/didOpen",
             "textDocument/didChange",
             "textDocument/didClose",
+            "textDocument/completion",
+            "textDocument/definition",
         };
         var matched: usize = methods.len;
         for (methods, 0..) |m, i| {
@@ -151,6 +153,8 @@ pub const Server = struct {
             4 => try self.handleDidOpen(msg),
             5 => try self.handleDidChange(msg),
             6 => try self.handleDidClose(msg),
+            7 => try self.handleCompletion(msg, writer),
+            8 => try self.handleDefinition(msg, writer),
             else => std.log.debug("Unhandled method: {s}", .{method}),
         }
     }
@@ -171,6 +175,13 @@ pub const Server = struct {
         try text_document_sync.put(arena_alloc, "openClose", .{ .bool = true });
         try text_document_sync.put(arena_alloc, "change", .{ .integer = 2 });
         try capabilities.put(arena_alloc, "textDocumentSync", .{ .object = text_document_sync });
+
+        var completion_trigger_chars = std.json.Array.init(arena_alloc);
+        try completion_trigger_chars.append(.{ .string = "." });
+        var completion_provider: std.json.ObjectMap = .empty;
+        try completion_provider.put(arena_alloc, "triggerCharacters", .{ .array = completion_trigger_chars });
+        try capabilities.put(arena_alloc, "completionProvider", .{ .object = completion_provider });
+        try capabilities.put(arena_alloc, "definitionProvider", .{ .bool = true });
 
         var server_info: std.json.ObjectMap = .empty;
         try server_info.put(arena_alloc, "name", .{ .string = try arena_alloc.dupe(u8, "zust-analyzer") });
@@ -292,6 +303,99 @@ pub const Server = struct {
         return offset;
     }
 
+    fn handleCompletion(self: *Server, msg: JSONRPC.Message, writer: *std.Io.Writer) !void {
+        const params = msg.params orelse return;
+        const text_doc = params.object.get("textDocument") orelse return;
+        const uri = text_doc.object.get("uri") orelse return;
+        const uri_str = uri.string;
+        const position = params.object.get("position") orelse return;
+        const line = @as(usize, @intCast(position.object.get("line").?.integer));
+        const character = @as(usize, @intCast(position.object.get("character").?.integer));
+        const doc = self.documents.get(uri_str) orelse return;
+        const line_text = getLineText(doc.source, line);
+        const prefix = extractPrefix(line_text, character);
+        const arena_alloc = self.arena.allocator();
+        var completions = std.json.Array.init(arena_alloc);
+        if (std.mem.startsWith(u8, prefix, "safe.")) {
+            const search = prefix[5..];
+            for (zust_types) |t| {
+                if (search.len == 0 or std.mem.startsWith(u8, t.name, search)) {
+                    var item: std.json.ObjectMap = .empty;
+                    const label = try arena_alloc.dupe(u8, t.name);
+                    try item.put(arena_alloc, "label", .{ .string = label });
+                    try item.put(arena_alloc, "kind", .{ .integer = 7 });
+                    const detail = try arena_alloc.dupe(u8, "zust type");
+                    try item.put(arena_alloc, "detail", .{ .string = detail });
+                    const doc_str = try arena_alloc.dupe(u8, t.doc);
+                    try item.put(arena_alloc, "documentation", .{ .string = doc_str });
+                    try completions.append(.{ .object = item });
+                }
+            }
+        }
+        var result: std.json.ObjectMap = .empty;
+        try result.put(arena_alloc, "items", .{ .array = completions });
+        try result.put(arena_alloc, "isIncomplete", .{ .bool = false });
+        const response = JSONRPC.Message{
+            .jsonrpc = "2.0",
+            .id = msg.id,
+            .result = .{ .object = result },
+        };
+        try JSONRPC.writeMessage(response, writer, arena_alloc);
+    }
+
+    fn handleDefinition(self: *Server, msg: JSONRPC.Message, writer: *std.Io.Writer) !void {
+        const params = msg.params orelse return;
+        const text_doc = params.object.get("textDocument") orelse return;
+        const uri = text_doc.object.get("uri") orelse return;
+        const uri_str = uri.string;
+        const position = params.object.get("position") orelse return;
+        const line = @as(usize, @intCast(position.object.get("line").?.integer));
+        const character = @as(usize, @intCast(position.object.get("character").?.integer));
+        const doc = self.documents.get(uri_str) orelse return;
+        const line_text = getLineText(doc.source, line);
+        const word = extractWordAtPosition(line_text, character);
+        const arena_alloc = self.arena.allocator();
+        for (zust_type_files) |tf| {
+            if (std.mem.eql(u8, word, tf.name)) {
+                const file_uri = try std.fmt.allocPrint(self.gpa, "file://{s}", .{tf.file});
+                defer self.gpa.free(file_uri);
+                var loc: std.json.ObjectMap = .empty;
+                var range: std.json.ObjectMap = .empty;
+                var start: std.json.ObjectMap = .empty;
+                try start.put(arena_alloc, "line", .{ .integer = 0 });
+                try start.put(arena_alloc, "character", .{ .integer = 0 });
+                var end: std.json.ObjectMap = .empty;
+                try end.put(arena_alloc, "line", .{ .integer = 0 });
+                try end.put(arena_alloc, "character", .{ .integer = 1 });
+                try range.put(arena_alloc, "start", .{ .object = start });
+                try range.put(arena_alloc, "end", .{ .object = end });
+                const uri_copy = try arena_alloc.dupe(u8, file_uri);
+                try loc.put(arena_alloc, "uri", .{ .string = uri_copy });
+                try loc.put(arena_alloc, "range", .{ .object = range });
+                var locations = std.json.Array.init(arena_alloc);
+                try locations.append(.{ .object = loc });
+                const response = JSONRPC.Message{
+                    .jsonrpc = "2.0",
+                    .id = msg.id,
+                    .result = .{ .array = locations },
+                };
+                try JSONRPC.writeMessage(response, writer, arena_alloc);
+                return;
+            }
+        }
+        try self.writeNullResponse(msg, writer);
+    }
+
+    fn writeNullResponse(self: *Server, msg: JSONRPC.Message, writer: *std.Io.Writer) !void {
+        _ = self;
+        const response = JSONRPC.Message{
+            .jsonrpc = "2.0",
+            .id = msg.id,
+            .result = .null,
+        };
+        try JSONRPC.writeMessage(response, writer, std.heap.page_allocator);
+    }
+
     fn handleDidClose(self: *Server, msg: JSONRPC.Message) !void {
         const params = msg.params orelse return;
 
@@ -406,6 +510,120 @@ pub const Server = struct {
         }
     }
 
+    const ZustType = struct {
+        name: []const u8,
+        doc: []const u8,
+    };
+
+    const zust_types = &[_]ZustType{
+        .{ .name = "Box", .doc = "Heap allocation with compile-time ownership tracking" },
+        .{ .name = "Rc", .doc = "Single-threaded reference counting" },
+        .{ .name = "Arc", .doc = "Thread-safe reference counting" },
+        .{ .name = "Mutex", .doc = "Mutual exclusion with compile-time borrow checking" },
+        .{ .name = "String", .doc = "Growable string with SSO" },
+        .{ .name = "ArrayList", .doc = "Dynamic array with ownership semantics" },
+        .{ .name = "HashMap", .doc = "Hash map with ownership tracking" },
+        .{ .name = "VecDeque", .doc = "Double-ended queue" },
+        .{ .name = "Slice", .doc = "Borrow-checked slice reference" },
+        .{ .name = "Cell", .doc = "Interior mutability for Copy types" },
+        .{ .name = "Channel", .doc = "Multi-producer multi-consumer queue" },
+        .{ .name = "ThreadPool", .doc = "Work-stealing thread pool" },
+        .{ .name = "SmallString", .doc = "Small String Optimization string" },
+        .{ .name = "RingBuffer", .doc = "Fixed-capacity circular buffer" },
+        .{ .name = "LinkedList", .doc = "Doubly-linked list with safe iteration" },
+        .{ .name = "Arena", .doc = "Bump allocator with scoped deallocation" },
+        .{ .name = "Scope", .doc = "Ownership scope for grouped deallocation" },
+        .{ .name = "Async", .doc = "Async/await runtime integration" },
+        .{ .name = "Cow", .doc = "Clone-on-write pointer" },
+        .{ .name = "DeadlockDetector", .doc = "Compile-time deadlock detection" },
+        .{ .name = "Iterators", .doc = "Safe iterator traits" },
+        .{ .name = "ManuallyDrop", .doc = "Explicit drop control" },
+        .{ .name = "MaybeUninit", .doc = "Maybe-uninitialized value wrapper" },
+        .{ .name = "Pin", .doc = "Pinned pointer guarantee" },
+        .{ .name = "BTreeMap", .doc = "B-tree map with owned keys" },
+        .{ .name = "HashSet", .doc = "Hash set backed by HashMap" },
+        .{ .name = "BinaryHeap", .doc = "Priority queue with ownership" },
+        .{ .name = "UnsafeCell", .doc = "Unsafe interior mutability escape hatch" },
+        .{ .name = "PhantomData", .doc = "Zero-sized type for variance markers" },
+        .{ .name = "Stack", .doc = "Fixed-capacity stack" },
+        .{ .name = "Pool", .doc = "Object pool for reuse" },
+        .{ .name = "SimdUtils", .doc = "SIMD helper utilities" },
+        .{ .name = "OffsetGuard", .doc = "Bounds-checked offset arithmetic" },
+        .{ .name = "Aligned", .doc = "Alignment-aware pointer wrapper" },
+        .{ .name = "Allocator", .doc = "Ownership-aware allocator interface" },
+        .{ .name = "Lifetime", .doc = "Compile-time lifetime tracking" },
+        .{ .name = "TaggedUnion", .doc = "Discriminated union with safety" },
+        .{ .name = "Semaphore", .doc = "Counting semaphore" },
+        .{ .name = "Barrier", .doc = "Thread synchronization barrier" },
+        .{ .name = "LockFreeQueue", .doc = "Lock-free MPSC queue" },
+        .{ .name = "AtomicCounter", .doc = "Atomic counter operations" },
+        .{ .name = "TimedLock", .doc = "Lock with timeout" },
+        .{ .name = "LockHierarchy", .doc = "Compile-time lock ordering" },
+        .{ .name = "OnceCell", .doc = "Single-initialization cell" },
+        .{ .name = "LazyStatic", .doc = "Lazy-initialized static value" },
+        .{ .name = "BitSet", .doc = "Fixed-size bit set" },
+        .{ .name = "CheckedInt", .doc = "Integer with overflow checking" },
+        .{ .name = "Resources", .doc = "Resource acquisition and release tracking" },
+        .{ .name = "SendSync", .doc = "Send and Sync trait markers" },
+    };
+
+    const ZustTypeFile = struct {
+        name: []const u8,
+        file: []const u8,
+    };
+
+    const zust_type_files = &[_]ZustTypeFile{
+        .{ .name = "Box", .file = "lib/Box.zig" },
+        .{ .name = "Rc", .file = "lib/Rc.zig" },
+        .{ .name = "Arc", .file = "lib/Arc.zig" },
+        .{ .name = "Mutex", .file = "lib/Mutex.zig" },
+        .{ .name = "String", .file = "lib/String.zig" },
+        .{ .name = "ArrayList", .file = "lib/ArrayList.zig" },
+        .{ .name = "HashMap", .file = "lib/HashMap.zig" },
+        .{ .name = "VecDeque", .file = "lib/VecDeque.zig" },
+        .{ .name = "Slice", .file = "lib/Slice.zig" },
+        .{ .name = "Cell", .file = "lib/Cell.zig" },
+        .{ .name = "Channel", .file = "lib/Channel.zig" },
+        .{ .name = "ThreadPool", .file = "lib/ThreadPool.zig" },
+        .{ .name = "SmallString", .file = "lib/SmallString.zig" },
+        .{ .name = "RingBuffer", .file = "lib/RingBuffer.zig" },
+        .{ .name = "LinkedList", .file = "lib/LinkedList.zig" },
+        .{ .name = "Arena", .file = "lib/Arena.zig" },
+        .{ .name = "Scope", .file = "lib/Scope.zig" },
+        .{ .name = "Async", .file = "lib/Async.zig" },
+        .{ .name = "Cow", .file = "lib/Cow.zig" },
+        .{ .name = "DeadlockDetector", .file = "lib/DeadlockDetector.zig" },
+        .{ .name = "Iterators", .file = "lib/Iterators.zig" },
+        .{ .name = "ManuallyDrop", .file = "lib/ManuallyDrop.zig" },
+        .{ .name = "MaybeUninit", .file = "lib/MaybeUninit.zig" },
+        .{ .name = "Pin", .file = "lib/Pin.zig" },
+        .{ .name = "BTreeMap", .file = "lib/BTreeMap.zig" },
+        .{ .name = "HashSet", .file = "lib/HashSet.zig" },
+        .{ .name = "BinaryHeap", .file = "lib/BinaryHeap.zig" },
+        .{ .name = "UnsafeCell", .file = "lib/UnsafeCell.zig" },
+        .{ .name = "PhantomData", .file = "lib/PhantomData.zig" },
+        .{ .name = "Stack", .file = "lib/Stack.zig" },
+        .{ .name = "Pool", .file = "lib/Pool.zig" },
+        .{ .name = "SimdUtils", .file = "lib/SimdUtils.zig" },
+        .{ .name = "OffsetGuard", .file = "lib/OffsetGuard.zig" },
+        .{ .name = "Aligned", .file = "lib/Aligned.zig" },
+        .{ .name = "Allocator", .file = "lib/Allocator.zig" },
+        .{ .name = "Lifetime", .file = "lib/Lifetime.zig" },
+        .{ .name = "TaggedUnion", .file = "lib/TaggedUnion.zig" },
+        .{ .name = "Semaphore", .file = "lib/Semaphore.zig" },
+        .{ .name = "Barrier", .file = "lib/Barrier.zig" },
+        .{ .name = "LockFreeQueue", .file = "lib/LockFreeQueue.zig" },
+        .{ .name = "AtomicCounter", .file = "lib/AtomicCounter.zig" },
+        .{ .name = "TimedLock", .file = "lib/TimedLock.zig" },
+        .{ .name = "LockHierarchy", .file = "lib/LockHierarchy.zig" },
+        .{ .name = "OnceCell", .file = "lib/OnceCell.zig" },
+        .{ .name = "LazyStatic", .file = "lib/LazyStatic.zig" },
+        .{ .name = "BitSet", .file = "lib/BitSet.zig" },
+        .{ .name = "CheckedInt", .file = "lib/CheckedInt.zig" },
+        .{ .name = "Resources", .file = "lib/Resources.zig" },
+        .{ .name = "SendSync", .file = "lib/SendSync.zig" },
+    };
+
     const LSPDiagnostic = struct {
         range: Range,
         severity: i32,
@@ -423,3 +641,110 @@ pub const Server = struct {
         };
     };
 };
+
+test "getLineText extracts correct line" {
+    const source = "line one\nline two\nline three";
+    try std.testing.expectEqualStrings("line one", getLineText(source, 0));
+    try std.testing.expectEqualStrings("line two", getLineText(source, 1));
+    try std.testing.expectEqualStrings("line three", getLineText(source, 2));
+}
+
+test "extractPrefix extracts identifier chain before cursor" {
+    const line = "    const x = safe.B";
+    try std.testing.expectEqualStrings("safe.B", extractPrefix(line, 20));
+}
+
+test "extractWordAtPosition extracts word at cursor" {
+    const source = "const x = safe.Box;\n";
+    const line_text = getLineText(source, 0);
+    try std.testing.expectEqualStrings("Box", extractWordAtPosition(line_text, 15));
+    try std.testing.expectEqualStrings("Box", extractWordAtPosition(line_text, 16));
+    try std.testing.expectEqualStrings("safe", extractWordAtPosition(line_text, 10));
+}
+
+test "code completion returns types for safe. prefix" {
+    const types = Server.zust_types;
+    try std.testing.expectEqual(@as(usize, 49), types.len);
+    var found_box = false;
+    for (types) |t| {
+        if (std.mem.eql(u8, t.name, "Box")) {
+            found_box = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_box);
+}
+
+test "code completion filters by partial match safe.Bo" {
+    const search = "Bo";
+    var matches: usize = 0;
+    var matched_name: ?[]const u8 = null;
+    for (Server.zust_types) |t| {
+        if (std.mem.startsWith(u8, t.name, search)) {
+            matches += 1;
+            matched_name = t.name;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), matches);
+    try std.testing.expectEqualStrings("Box", matched_name.?);
+}
+
+test "go-to-definition returns correct file for Box" {
+    var found = false;
+    for (Server.zust_type_files) |tf| {
+        if (std.mem.eql(u8, tf.name, "Box")) {
+            found = true;
+            try std.testing.expectEqualStrings("lib/Box.zig", tf.file);
+            break;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+fn getLineText(source: []const u8, line: usize) []const u8 {
+    var current_line: usize = 0;
+    var offset: usize = 0;
+    while (current_line < line and offset < source.len) {
+        if (source[offset] == '\n') current_line += 1;
+        offset += 1;
+    }
+    const start = offset;
+    while (offset < source.len and source[offset] != '\n') {
+        offset += 1;
+    }
+    return source[start..offset];
+}
+
+fn isIdentChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+}
+
+fn extractPrefix(line_text: []const u8, character: usize) []const u8 {
+    if (character > line_text.len) return line_text;
+    var start = character;
+    while (start > 0) {
+        const c = line_text[start - 1];
+        if (isIdentChar(c) or c == '.') {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    return line_text[start..character];
+}
+
+fn extractWordAtPosition(line_text: []const u8, character: usize) []const u8 {
+    if (character > line_text.len) return "";
+    var start = character;
+    while (start > 0) {
+        if (!isIdentChar(line_text[start - 1])) break;
+        start -= 1;
+    }
+    var end = character;
+    while (end < line_text.len) {
+        if (!isIdentChar(line_text[end])) break;
+        end += 1;
+    }
+    return line_text[start..end];
+}
+
