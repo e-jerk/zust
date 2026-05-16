@@ -37,6 +37,20 @@ pub fn build(b: *std.Build) void {
     const run_simd_test = b.addRunArtifact(simd_test);
     lib_test_step.dependOn(&run_simd_test.step);
 
+    // Fuzz tests
+    const fuzz_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/fuzz_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fuzz_test_mod.addImport("safe", safe_module);
+    const fuzz_test = b.addTest(.{
+        .name = "fuzz_tests",
+        .root_module = fuzz_test_mod,
+    });
+    const run_fuzz_test = b.addRunArtifact(fuzz_test);
+    lib_test_step.dependOn(&run_fuzz_test.step);
+
     // Analyzer executable (dog-foods safe.Box)
     const analyzer_mod = b.createModule(.{
         .root_source_file = b.path("analyzer/src/main.zig"),
@@ -113,6 +127,7 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("lib/Stack.zig"));
     run_analyzer.addFileArg(b.path("lib/Pool.zig"));
     run_analyzer.addFileArg(b.path("lib/SimdUtils.zig"));
+    run_analyzer.addFileArg(b.path("lib/BitSet.zig"));
     run_analyzer.addFileArg(b.path("lib/OffsetGuard.zig"));
     run_analyzer.addFileArg(b.path("lib/Aligned.zig"));
     run_analyzer.addFileArg(b.path("lib/Allocator.zig"));
@@ -125,6 +140,7 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("lib/AtomicCounter.zig"));
     run_analyzer.addFileArg(b.path("lib/TimedLock.zig"));
     run_analyzer.addFileArg(b.path("lib/LockHierarchy.zig"));
+    run_analyzer.addFileArg(b.path("lib/StringInterner.zig"));
     run_analyzer.addFileArg(b.path("lib/safe.zig"));
     // Analyzer files
     run_analyzer.addFileArg(b.path("analyzer/src/Analysis.zig"));
