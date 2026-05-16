@@ -122,6 +122,7 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("lib/LockFreeQueue.zig"));
     run_analyzer.addFileArg(b.path("lib/AtomicCounter.zig"));
     run_analyzer.addFileArg(b.path("lib/TimedLock.zig"));
+    run_analyzer.addFileArg(b.path("lib/CheckedInt.zig"));
     run_analyzer.addFileArg(b.path("lib/safe.zig"));
     // Analyzer files
     run_analyzer.addFileArg(b.path("analyzer/src/Analysis.zig"));
