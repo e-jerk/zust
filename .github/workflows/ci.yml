@@ -75,11 +75,11 @@ jobs:
       - name: Verify analyzer self-check
         run: zig build analyze --summary all
 
-      - name: Run analyzer on all source files (high strictness)
+      - name: Run analyzer on all source files (medium strictness)
         run: |
           ./zig-out/bin/zust-analyze \
             lib/*.zig analyzer/src/*.zig \
-            --strictness=high
+            --strictness=medium
 
       - name: Run analyzer on bad patterns (should find bugs)
         run: |

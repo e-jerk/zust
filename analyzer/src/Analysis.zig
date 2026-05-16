@@ -1931,9 +1931,9 @@ pub const Analyzer = struct {
     }
 
     fn analyzeFor(self: *Analyzer, file_path: []const u8, ast: *const std.zig.Ast, node: zig.Ast.Node.Index) AnalyzeError!void {
-        const data = ast.nodes.items(.data)[@intFromEnum(node)];
-        const iterable = data.node_and_node[0];
-        const body = data.node_and_node[1];
+        const for_info = ast.fullFor(node) orelse return;
+        const iterable = for_info.ast.inputs[0];
+        const body = for_info.ast.then_expr;
 
         if (getCollectionVarFromIterable(ast, iterable)) |collection_var| {
             const token_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(node)]);
