@@ -1,6 +1,7 @@
 const std = @import("std");
 const Box = @import("Box.zig").Box;
 const ArrayList = @import("ArrayList.zig").ArrayList;
+const SimdUtils = @import("SimdUtils.zig");
 
 fn assertIsCopy(comptime T: type) void {
     const info = @typeInfo(T);
@@ -252,7 +253,11 @@ pub fn Slice(comptime T: type) type {
         pub fn fill(self: *Self, value: T) void {
             comptime assertIsCopy(T);
             const mutable = @constCast(self.data);
-            @memset(mutable, value);
+            if (@sizeOf(T) == 1) {
+                SimdUtils.fill(@as([]u8, @ptrCast(mutable)), @bitCast(value));
+            } else {
+                @memset(mutable, value);
+            }
         }
 
         /// Reverse elements in place (Copy types only).
