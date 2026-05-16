@@ -155,7 +155,7 @@ pub fn fill(dst: []u8, value: u8) void {
 
 pub fn findAnyByte(haystack: []const u8, needles: []const u8) ?usize {
     if (needles.len == 0) return null;
-    if (needles.len > 4) @compileError("findAnyByte supports up to 4 needles");
+    std.debug.assert(needles.len <= 4);
     if (haystack.len < 16) {
         for (0..haystack.len) |i| {
             for (needles) |n| {

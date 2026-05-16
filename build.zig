@@ -23,6 +23,20 @@ pub fn build(b: *std.Build) void {
     });
     lib_test_step.dependOn(&b.addRunArtifact(lib_tests).step);
 
+    // SIMD tests
+    const simd_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/simd_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    simd_test_mod.addImport("safe", safe_module);
+    const simd_test = b.addTest(.{
+        .name = "simd_tests",
+        .root_module = simd_test_mod,
+    });
+    const run_simd_test = b.addRunArtifact(simd_test);
+    lib_test_step.dependOn(&run_simd_test.step);
+
     // Analyzer executable (dog-foods safe.Box)
     const analyzer_mod = b.createModule(.{
         .root_source_file = b.path("analyzer/src/main.zig"),
