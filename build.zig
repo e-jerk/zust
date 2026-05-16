@@ -151,6 +151,10 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("analyzer/src/LSP.zig"));
     run_analyzer.addFileArg(b.path("analyzer/src/JSONRPC.zig"));
     run_analyzer.addFileArg(b.path("analyzer/src/Contract.zig"));
+    // NOTE: transpiler.zig is not yet in the analyzer list due to a pre-existing
+    // analyzer bug in markReadsInExpr that crashes on certain AST structures.
+    // The transpiler is fully dog-food'd with safe types internally.
+    // TODO: Fix analyzer crash then re-add: run_analyzer.addFileArg(b.path("tools/transpiler.zig"));
 
     // Pass options
     run_analyzer.addArg(b.fmt("--strictness={s}", .{strictness}));

@@ -1362,9 +1362,20 @@ pub const Analyzer = struct {
                         const extra = ast.extra_data[@intFromEnum(data.extra_range.start)..@intFromEnum(data.extra_range.end)];
                         for (extra) |n| try self.checkDerefs(file_path, ast, @enumFromInt(n));
                     },
-                    .if_simple, .@"if" => {
+                    .if_simple => {
                         try self.checkDerefs(file_path, ast, data.node_and_node[0]);
                         try self.checkDerefs(file_path, ast, data.node_and_node[1]);
+                    },
+                    .@"if" => {
+                        try self.checkDerefs(file_path, ast, data.node_and_extra[0]);
+                        const extra = ast.extra_data[@intFromEnum(data.node_and_extra[1])..];
+                        const then_body: zig.Ast.Node.Index = @enumFromInt(extra[0]);
+                        try self.checkDerefs(file_path, ast, then_body);
+                        const else_idx = extra[1];
+                        if (else_idx != 0) {
+                            const else_body: zig.Ast.Node.Index = @enumFromInt(else_idx);
+                            try self.checkDerefs(file_path, ast, else_body);
+                        }
                     },
                     .unwrap_optional => {
                         try self.checkDerefs(file_path, ast, data.node_and_token[0]);
@@ -1845,10 +1856,22 @@ pub const Analyzer = struct {
                 const extra = ast.extra_data[@intFromEnum(data.extra_range.start)..@intFromEnum(data.extra_range.end)];
                 for (extra) |n| try self.markReadsInExpr(file_path, ast, @enumFromInt(n));
             },
-            .if_simple, .@"if" => {
+            .if_simple => {
                 const data = ast.nodes.items(.data)[@intFromEnum(node)];
                 try self.markReadsInExpr(file_path, ast, data.node_and_node[0]);
                 try self.markReadsInExpr(file_path, ast, data.node_and_node[1]);
+            },
+            .@"if" => {
+                const data = ast.nodes.items(.data)[@intFromEnum(node)];
+                try self.markReadsInExpr(file_path, ast, data.node_and_extra[0]);
+                const extra = ast.extra_data[@intFromEnum(data.node_and_extra[1])..];
+                const then_body: zig.Ast.Node.Index = @enumFromInt(extra[0]);
+                try self.markReadsInExpr(file_path, ast, then_body);
+                const else_idx = extra[1];
+                if (else_idx != 0) {
+                    const else_body: zig.Ast.Node.Index = @enumFromInt(else_idx);
+                    try self.markReadsInExpr(file_path, ast, else_body);
+                }
             },
             .while_simple, .while_cont => {
                 const data = ast.nodes.items(.data)[@intFromEnum(node)];
