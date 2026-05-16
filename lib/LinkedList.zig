@@ -156,6 +156,5 @@ pub fn LinkedList(comptime T: type) type {
                 return self.list.pop();
             }
         };
-
     };
 }

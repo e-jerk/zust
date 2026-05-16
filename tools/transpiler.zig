@@ -1054,15 +1054,19 @@ test "pattern: std.debug.print with pointer gets redacted" {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-    const args = init.minimal.args.vector;
 
-    if (args.len < 3) {
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args_iter.deinit();
+    _ = args_iter.skip(); // skip program name
+
+    const input_path = args_iter.next() orelse {
         std.debug.print("Usage: zust-transpile <input.zig> <output.zig>\n", .{});
         return;
-    }
-
-    const input_path = std.mem.span(args[1]);
-    const output_path = std.mem.span(args[2]);
+    };
+    const output_path = args_iter.next() orelse {
+        std.debug.print("Usage: zust-transpile <input.zig> <output.zig>\n", .{});
+        return;
+    };
 
     const input = try std.Io.Dir.cwd().readFileAlloc(init.io, input_path, allocator, std.Io.Limit.limited(1024 * 1024));
     defer allocator.free(input);

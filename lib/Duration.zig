@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const CheckedInt = @import("CheckedInt.zig").CheckedInt;
 
 /// Safe duration type with checked arithmetic.
@@ -68,6 +69,9 @@ pub const Instant = struct {
     const Self = @This();
 
     pub fn now() Self {
+        if (comptime builtin.target.os.tag == .windows) {
+            return .{ .duration_since_epoch = Duration.fromNanos(0) };
+        }
         var tv: std.c.timeval = undefined;
         _ = std.c.gettimeofday(&tv, null);
         const nanos = @as(i64, tv.sec) * std.time.ns_per_s + @as(i64, tv.usec) * 1000;
@@ -75,6 +79,9 @@ pub const Instant = struct {
     }
 
     pub fn elapsed(self: Self) Duration {
+        if (comptime builtin.target.os.tag == .windows) {
+            return Duration.fromNanos(0);
+        }
         var tv: std.c.timeval = undefined;
         _ = std.c.gettimeofday(&tv, null);
         const nanos = @as(i64, tv.sec) * std.time.ns_per_s + @as(i64, tv.usec) * 1000;

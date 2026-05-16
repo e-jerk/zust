@@ -16,14 +16,14 @@ pub const DiagnosticKind = enum {
     StackUseAfterReturn,
     DataRace,
     RawPattern,
-    MemoryLeak,       // ManuallyDrop not dropped, Rc/Arc not dropped
-    Deadlock,         // lock without unlock
+    MemoryLeak, // ManuallyDrop not dropped, Rc/Arc not dropped
+    Deadlock, // lock without unlock
     AlreadyInitialized, // double set on OnceCell
-    NotInitialized,   // read before init on MaybeUninit
-    ChannelClosed,    // send after close
-    AlreadySent,      // double send on Oneshot
-    InvalidMove,      // Pin value moved
-    StdAlternative,   // suggest zust alternative to std type
+    NotInitialized, // read before init on MaybeUninit
+    ChannelClosed, // send after close
+    AlreadySent, // double send on Oneshot
+    InvalidMove, // Pin value moved
+    StdAlternative, // suggest zust alternative to std type
     NullDereference,
     BufferOverflow,
     DivisionByZero,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// A read-write lock that supports atomically upgrading a read lock to a write lock.
 ///
@@ -276,8 +277,10 @@ test "RwLockUpgrade write while upgrade pending" {
     }.f, .{ &rw, &wrote });
 
     // Give the writer time to start waiting
-    const req1 = std.c.timespec{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-    _ = std.c.nanosleep(&req1, null);
+    if (comptime builtin.target.os.tag != .windows) {
+        const req1 = std.c.timespec{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&req1, null);
+    }
 
     // Upgrade should succeed (we are the only reader)
     const wguard = try rw.tryUpgrade(rguard);
@@ -358,8 +361,10 @@ test "ReentrantMutex different threads block" {
     }.f, .{ &mtx, &other_got_lock });
 
     // Give the other thread time to try (and block)
-    const req2 = std.c.timespec{ .sec = 0, .nsec = 20 * std.time.ns_per_ms };
-    _ = std.c.nanosleep(&req2, null);
+    if (comptime builtin.target.os.tag != .windows) {
+        const req2 = std.c.timespec{ .sec = 0, .nsec = 20 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&req2, null);
+    }
     try std.testing.expect(!other_got_lock);
 
     // Release outer lock

@@ -198,7 +198,7 @@ pub fn unbounded(comptime T: type, allocator: std.mem.Allocator) !Channel(T) {
 test "Channel send and recv" {
     var ch = try Channel(u32).init(std.testing.allocator, 4);
     defer ch.deinit();
-    
+
     try ch.send(42);
     const val = ch.recv();
     try std.testing.expectEqual(val.?, 42);
@@ -206,14 +206,14 @@ test "Channel send and recv" {
 
 test "Oneshot send and recv" {
     var os = Oneshot(u32).init();
-    
+
     try os.send(100);
     try std.testing.expect(os.isSent());
-    
+
     const val = os.recv();
     try std.testing.expectEqual(val.?, 100);
     try std.testing.expect(os.isReceived());
-    
+
     // Second recv returns null
     const val2 = os.recv();
     try std.testing.expect(val2 == null);
@@ -222,16 +222,16 @@ test "Oneshot send and recv" {
 test "Channel close" {
     var ch = try Channel(u32).init(std.testing.allocator, 4);
     defer ch.deinit();
-    
+
     try ch.send(1);
     ch.close();
-    
+
     try std.testing.expect(ch.isClosed());
-    
+
     // Drain remaining
     const val = ch.recv();
     try std.testing.expectEqual(val.?, 1);
-    
+
     // Empty after drain
     const val2 = ch.recv();
     try std.testing.expect(val2 == null);
@@ -240,13 +240,13 @@ test "Channel close" {
 test "Channel multiple values" {
     var ch = try Channel(u32).init(std.testing.allocator, 4);
     defer ch.deinit();
-    
+
     try ch.send(10);
     try ch.send(20);
     try ch.send(30);
-    
+
     try std.testing.expectEqual(ch.len(), 3);
-    
+
     try std.testing.expectEqual(ch.recv().?, 10);
     try std.testing.expectEqual(ch.recv().?, 20);
     try std.testing.expectEqual(ch.recv().?, 30);

@@ -53,7 +53,7 @@ pub fn ArenaBox(comptime T: type) type {
     return struct {
         ptr: *T,
         generation: *const u32, // Points to arena's generation counter
-        birth_generation: u32,  // Generation when this box was created
+        birth_generation: u32, // Generation when this box was created
 
         const Self = @This();
 

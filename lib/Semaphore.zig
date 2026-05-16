@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Counting semaphore for limiting concurrent access.
 ///
@@ -132,8 +133,10 @@ test "Semaphore limits concurrent access" {
                     _ = c.max.cmpxchgStrong(max, cur, .seq_cst, .seq_cst);
                 }
                 _ = c.counter.fetchAdd(1, .seq_cst);
-                const req = std.c.timespec{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-                _ = std.c.nanosleep(&req, null);
+                if (comptime builtin.target.os.tag != .windows) {
+                    const req = std.c.timespec{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+                    _ = std.c.nanosleep(&req, null);
+                }
                 _ = c.current.fetchSub(1, .seq_cst);
                 c.sem.signal();
             }

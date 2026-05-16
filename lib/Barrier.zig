@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Synchronization barrier for N threads.
 ///
@@ -158,8 +159,10 @@ test "Barrier exact count" {
 
     var t2 = try std.Thread.spawn(.{}, struct {
         fn f(ctx: Ctx) void {
-            const req = std.c.timespec{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
-            _ = std.c.nanosleep(&req, null);
+            if (comptime builtin.target.os.tag != .windows) {
+                const req = std.c.timespec{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+                _ = std.c.nanosleep(&req, null);
+            }
             ctx.barrier.wait();
         }
     }.f, .{Ctx{

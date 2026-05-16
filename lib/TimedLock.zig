@@ -1,6 +1,10 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 fn nanoTimestamp() i128 {
+    if (comptime builtin.target.os.tag == .windows) {
+        return 0;
+    }
     var tv: std.c.timeval = undefined;
     _ = std.c.gettimeofday(&tv, null);
     return @as(i128, tv.sec) * std.time.ns_per_s + @as(i128, tv.usec) * std.time.ns_per_us;

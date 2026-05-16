@@ -54,20 +54,34 @@ pub const Oneshot = @import("Channel.zig").Oneshot;
 pub const Pool = @import("Pool.zig").Pool;
 pub const PoolBox = @import("Pool.zig").PoolBox;
 pub const FixedVec = @import("Pool.zig").FixedVec;
-comptime { _ = Pool; }
-comptime { _ = FixedVec; }
+comptime {
+    _ = Pool;
+}
+comptime {
+    _ = FixedVec;
+}
 pub const ZustAllocator = @import("Allocator.zig").ZustAllocator;
 pub const TrackingAllocator = @import("Allocator.zig").TrackingAllocator;
 pub const wrap = @import("Allocator.zig").wrap;
-comptime { _ = ZustAllocator; }
+comptime {
+    _ = ZustAllocator;
+}
 pub const SimdUtils = @import("SimdUtils.zig");
-comptime { _ = SimdUtils; }
+comptime {
+    _ = SimdUtils;
+}
 pub const FixedBitSet = @import("BitSet.zig").FixedBitSet;
 pub const BitSet = @import("BitSet.zig").BitSet;
-comptime { _ = FixedBitSet; }
-comptime { _ = BitSet; }
+comptime {
+    _ = FixedBitSet;
+}
+comptime {
+    _ = BitSet;
+}
 pub const SendSync = @import("SendSync.zig");
-comptime { _ = SendSync; }
+comptime {
+    _ = SendSync;
+}
 pub const StackRef = @import("Lifetime.zig").StackRef;
 pub const ScopeGuard = @import("Lifetime.zig").ScopeGuard;
 pub const ScopeId = @import("Lifetime.zig").ScopeId;
@@ -98,14 +112,30 @@ pub const RwLockUpgradeReadGuard = @import("RwLock2.zig").RwLockUpgradeReadGuard
 pub const RwLockUpgradeWriteGuard = @import("RwLock2.zig").RwLockUpgradeWriteGuard;
 pub const ReentrantMutex = @import("RwLock2.zig").ReentrantMutex;
 pub const ReentrantMutexGuard = @import("RwLock2.zig").ReentrantMutexGuard;
-comptime { _ = RwLockUpgrade; }
-comptime { _ = ReentrantMutex; }
-comptime { _ = ThreadPool; }
-comptime { _ = Semaphore; }
-comptime { _ = Barrier; }
-comptime { _ = LockFreeQueue; }
-comptime { _ = AtomicCounter; }
-comptime { _ = TimedMutex; }
+comptime {
+    _ = RwLockUpgrade;
+}
+comptime {
+    _ = ReentrantMutex;
+}
+comptime {
+    _ = ThreadPool;
+}
+comptime {
+    _ = Semaphore;
+}
+comptime {
+    _ = Barrier;
+}
+comptime {
+    _ = LockFreeQueue;
+}
+comptime {
+    _ = AtomicCounter;
+}
+comptime {
+    _ = TimedMutex;
+}
 pub const DeadlockDetector = @import("DeadlockDetector.zig").DeadlockDetector;
 pub const BTreeSet = @import("BTreeSet.zig").BTreeSet;
 pub const PathBuf = @import("PathBuf.zig").PathBuf;
@@ -113,18 +143,36 @@ pub const Duration = @import("Duration.zig").Duration;
 pub const Instant = @import("Duration.zig").Instant;
 pub const CString = @import("CString.zig").CString;
 pub const Condvar = @import("Condvar.zig").Condvar;
-comptime { _ = BTreeSet; }
-comptime { _ = PathBuf; }
-comptime { _ = Duration; }
-comptime { _ = CString; }
-comptime { _ = Condvar; }
-comptime { _ = DeadlockDetector; }
+comptime {
+    _ = BTreeSet;
+}
+comptime {
+    _ = PathBuf;
+}
+comptime {
+    _ = Duration;
+}
+comptime {
+    _ = CString;
+}
+comptime {
+    _ = Condvar;
+}
+comptime {
+    _ = DeadlockDetector;
+}
 pub const CheckedInt = @import("CheckedInt.zig").CheckedInt;
 pub const SaturatingInt = @import("CheckedInt.zig").SaturatingInt;
-comptime { _ = CheckedInt; }
-comptime { _ = SaturatingInt; }
+comptime {
+    _ = CheckedInt;
+}
+comptime {
+    _ = SaturatingInt;
+}
 pub const BloomFilter = @import("BloomFilter.zig").BloomFilter;
-comptime { _ = BloomFilter; }
+comptime {
+    _ = BloomFilter;
+}
 pub const AlignedPtr = @import("Aligned.zig").AlignedPtr;
 pub const CacheAligned = @import("Aligned.zig").CacheAligned;
 pub const GuardedSlice = @import("OffsetGuard.zig").GuardedSlice;
@@ -2105,4 +2153,3 @@ test "Option some and none" {
     // This would panic at runtime:
     // none_opt.unwrap();
 }
-

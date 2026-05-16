@@ -211,4 +211,3 @@ test "FixedVec capacity limit" {
     const result = vec.append(3);
     try std.testing.expectError(error.OutOfMemory, result);
 }
-

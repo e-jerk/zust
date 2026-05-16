@@ -18,12 +18,11 @@ const std = @import("std");
 /// - `owned` - function takes ownership (will free)
 /// - `borrowed` - function borrows temporarily (will not free)
 /// - `raw` - function uses raw pointers (unsafe)
-
 pub const Ownership = enum {
-    owned,    // Takes ownership, caller must not use after call
+    owned, // Takes ownership, caller must not use after call
     borrowed, // Borrows temporarily, caller retains ownership
-    raw,      // Raw pointer, no guarantees
-    unknown,  // No annotation provided
+    raw, // Raw pointer, no guarantees
+    unknown, // No annotation provided
 };
 
 pub const ParamContract = struct {
@@ -79,7 +78,7 @@ pub fn parseContract(text: []const u8, buf: *[8]ParamContract) ?FunctionContract
             // Find the param name (before "as")
             if (std.mem.indexOfPos(u8, inner, after_takes, " as ")) |as_pos| {
                 const param_name = std.mem.trim(u8, inner[after_takes..as_pos], " \t");
-                const ownership_text = std.mem.trim(u8, inner[as_pos + 4..], " \t,)");
+                const ownership_text = std.mem.trim(u8, inner[as_pos + 4 ..], " \t,)");
                 if (param_count < buf.len) {
                     buf[param_count] = .{
                         .param_name = param_name,
@@ -104,7 +103,7 @@ pub fn parseContract(text: []const u8, buf: *[8]ParamContract) ?FunctionContract
     if (std.mem.indexOf(u8, inner, returns_prefix)) |returns_start| {
         const after_returns = returns_start + returns_prefix.len;
         if (std.mem.indexOf(u8, inner[after_returns..], " as ")) |as_pos| {
-            const ownership_text = std.mem.trim(u8, inner[after_returns + as_pos + 4..], " \t,)");
+            const ownership_text = std.mem.trim(u8, inner[after_returns + as_pos + 4 ..], " \t,)");
             contract.return_ownership = parseOwnership(ownership_text);
         }
     }

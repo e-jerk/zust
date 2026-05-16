@@ -15,7 +15,6 @@ const Box = @import("Box.zig").Box;
 /// } // borrow automatically released here
 /// const dead = box.deinit(); // OK!
 /// ```
-
 /// Immutable borrow scope. Releases when deinitialized.
 pub fn ScopeImm(comptime T: type) type {
     return struct {

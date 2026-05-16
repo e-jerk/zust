@@ -267,7 +267,7 @@ pub const String = struct {
                 return null;
             }
 
-            const cp = std.unicode.utf8Decode(self.bytes[self.pos..self.pos + seq_len]) catch {
+            const cp = std.unicode.utf8Decode(self.bytes[self.pos .. self.pos + seq_len]) catch {
                 self.pos += 1;
                 return self.next();
             };

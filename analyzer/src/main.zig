@@ -33,20 +33,22 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
-    _ = args_iter.skip(); // skip program name
-
     // Check for --lsp mode first
     var lsp_mode = false;
     var arg_buf: [4096]u8 = undefined;
     var arg_len: usize = 0;
-    while (args_iter.next()) |arg| {
-        if (arg.len > arg_buf.len) continue;
-        @memcpy(arg_buf[0..arg.len], arg);
-        arg_len = arg.len;
-        if (std.mem.eql(u8, arg_buf[0..arg_len], "--lsp")) {
-            lsp_mode = true;
-            break;
+    {
+        var args_iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+        defer args_iter.deinit();
+        _ = args_iter.skip(); // skip program name
+        while (args_iter.next()) |arg| {
+            if (arg.len > arg_buf.len) continue;
+            @memcpy(arg_buf[0..arg.len], arg);
+            arg_len = arg.len;
+            if (std.mem.eql(u8, arg_buf[0..arg_len], "--lsp")) {
+                lsp_mode = true;
+                break;
+            }
         }
     }
 
@@ -66,7 +68,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Reset args for normal mode
-    args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args_iter.deinit();
     _ = args_iter.skip();
 
     var output_format: OutputFormat = .Human;

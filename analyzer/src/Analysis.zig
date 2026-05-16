@@ -41,11 +41,33 @@ const PtrOrigin = union(enum) {
 };
 
 const TypeCategory = enum {
-    Box, Rc, Arc, Weak, Mutex, RwLock, Cell, RefCell,
-    ManuallyDrop, MaybeUninit, Pin, OnceCell, LazyCell, OnceBox,
-    Channel, Oneshot, String, HashMap, BTreeMap, HashSet,
-    BinaryHeap, VecDeque, LinkedList, ArrayList, UnsafeCell,
-    Raw, Unknown,
+    Box,
+    Rc,
+    Arc,
+    Weak,
+    Mutex,
+    RwLock,
+    Cell,
+    RefCell,
+    ManuallyDrop,
+    MaybeUninit,
+    Pin,
+    OnceCell,
+    LazyCell,
+    OnceBox,
+    Channel,
+    Oneshot,
+    String,
+    HashMap,
+    BTreeMap,
+    HashSet,
+    BinaryHeap,
+    VecDeque,
+    LinkedList,
+    ArrayList,
+    UnsafeCell,
+    Raw,
+    Unknown,
 };
 
 /// State of a variable that holds a pointer or Box.
@@ -58,19 +80,19 @@ const VarState = struct {
     decl_col: u32,
     type_category: TypeCategory = .Unknown,
     // Type-specific state flags:
-    is_dropped: bool = false,        // For ManuallyDrop: has drop() been called?
-    is_locked: bool = false,         // For Mutex/RwLock: is currently locked?
-    is_initialized: bool = false,    // For OnceCell/MaybeUninit
-    is_closed: bool = false,         // For Channel
-    is_sent: bool = false,           // For Oneshot
-    is_mutable: bool = false,        // var vs const
-    is_read: bool = false,           // For race detection
-    is_written: bool = false,        // For race detection
+    is_dropped: bool = false, // For ManuallyDrop: has drop() been called?
+    is_locked: bool = false, // For Mutex/RwLock: is currently locked?
+    is_initialized: bool = false, // For OnceCell/MaybeUninit
+    is_closed: bool = false, // For Channel
+    is_sent: bool = false, // For Oneshot
+    is_mutable: bool = false, // var vs const
+    is_read: bool = false, // For race detection
+    is_written: bool = false, // For race detection
     null_status: enum { unknown, null, non_null } = .unknown,
     array_len: ?u32 = null,
-    is_std_resource: bool = false,   // std File, socket, stream, etc.
-    has_cleanup: bool = false,        // close/deinit/destroy seen
-    bit_width: ?u32 = null,           // For shift overflow detection
+    is_std_resource: bool = false, // std File, socket, stream, etc.
+    has_cleanup: bool = false, // close/deinit/destroy seen
+    bit_width: ?u32 = null, // For shift overflow detection
 };
 
 /// Active iterator tracking for iterator invalidation detection.
@@ -420,7 +442,7 @@ pub const Analyzer = struct {
             // Check for ownership contract annotations in doc comments
             var has_nocapture = false;
             var doc_token: ?zig.Ast.TokenIndex = null;
-            
+
             // Look for doc comments before the fn token
             const fn_token = fn_proto.ast.fn_token;
             if (fn_token > 0) {
@@ -437,7 +459,7 @@ pub const Analyzer = struct {
                     }
                 }
             }
-            
+
             var return_ownership: Contract.Ownership = .unknown;
             var param_contracts: [8]Contract.Ownership = .{.unknown} ** 8;
             if (doc_token) |dt| {
@@ -823,14 +845,14 @@ pub const Analyzer = struct {
                 const unwrapped = unwrapNode(ast, init_expr);
                 const callee = getCallee(ast, unwrapped);
                 const base_var = getBaseVar(ast, callee);
-                
+
                 // Validate: check if base variable is still live
                 if (self.variables.getPtr(base_var)) |base_state| {
                     if (!base_state.is_live) {
                         try self.addDiagnostic(file_path, .DoubleFree, "double free detected", @intCast(token_loc.line), @intCast(token_loc.column));
                     } else {
                         base_state.is_live = false;
-                        
+
                         // Check if any raw pointers derived from this box are still live
                         // and mark them as dead too (since the source Box is gone)
                         var derived_iter = self.variables.iterator();
@@ -843,7 +865,7 @@ pub const Analyzer = struct {
                         }
                     }
                 }
-                
+
                 const name_copy = try self.gpa.dupe(u8, decl_name);
                 try self.variables.put(name_copy, .{
                     .name = name_copy,
@@ -1313,7 +1335,18 @@ pub const Analyzer = struct {
                     .replacements = replacements,
                 });
             } else if (!var_state.is_box) {
-                try self.addDiagnostic(file_path, .UseAfterFree, "deinit called on non-Box type", @intCast(token_loc.line), @intCast(token_loc.column));
+                // Pragmatic: skip standard library types that legitimately have deinit
+                const is_std_lib = std.mem.endsWith(u8, base_var, "_iter") or
+                    std.mem.endsWith(u8, base_var, "_list") or
+                    std.mem.endsWith(u8, base_var, "_map") or
+                    std.mem.endsWith(u8, base_var, "_set") or
+                    std.mem.endsWith(u8, base_var, "_gpa") or
+                    std.mem.endsWith(u8, base_var, "_arena") or
+                    std.mem.eql(u8, base_var, "gpa") or
+                    std.mem.eql(u8, base_var, "arena");
+                if (!is_std_lib) {
+                    try self.addDiagnostic(file_path, .UseAfterFree, "deinit called on non-Box type", @intCast(token_loc.line), @intCast(token_loc.column));
+                }
             } else {
                 // Mark as deallocated
                 var_state.is_live = false;
@@ -1583,8 +1616,12 @@ pub const Analyzer = struct {
                         try self.checkDerefs(file_path, ast, data.node_and_node[1]);
                     },
                     .while_simple, .while_cont => {
-                        try self.checkDerefs(file_path, ast, data.node_and_node[0]);
-                        try self.checkDerefs(file_path, ast, data.node_and_node[1]);
+                        const while_info = ast.fullWhile(node).?;
+                        try self.checkDerefs(file_path, ast, while_info.ast.cond_expr);
+                        if (while_info.ast.cont_expr.unwrap()) |cont| {
+                            try self.checkDerefs(file_path, ast, cont);
+                        }
+                        try self.checkDerefs(file_path, ast, while_info.ast.then_expr);
                     },
                     .@"while" => {
                         const while_info = ast.whileFull(node);
@@ -1712,53 +1749,11 @@ pub const Analyzer = struct {
     fn shouldReport(self: *Analyzer, kind: Diagnostic.DiagnosticKind) bool {
         return switch (self.strictness) {
             .Low => switch (kind) {
-                .DoubleFree,
-                .UseAfterFree,
-                .UseAfterMove,
-                .MutableAliasing,
-                .PointerEscape,
-                .StackUseAfterReturn,
-                .DataRace,
-                .Deadlock,
-                .AlreadyInitialized,
-                .NotInitialized,
-                .ChannelClosed,
-                .AlreadySent,
-                .InvalidMove,
-                .NullDereference,
-                .BufferOverflow,
-                .RawPattern,
-                .DivisionByZero,
-                .ShiftOverflow,
-                .RawPointerArithmetic => true,
+                .DoubleFree, .UseAfterFree, .UseAfterMove, .MutableAliasing, .PointerEscape, .StackUseAfterReturn, .DataRace, .Deadlock, .AlreadyInitialized, .NotInitialized, .ChannelClosed, .AlreadySent, .InvalidMove, .NullDereference, .BufferOverflow, .RawPattern, .DivisionByZero, .ShiftOverflow, .RawPointerArithmetic => true,
                 else => false,
             },
             .Medium => switch (kind) {
-                .DoubleFree,
-                .UseAfterFree,
-                .UseAfterMove,
-                .MutableAliasing,
-                .PointerEscape,
-                .StackUseAfterReturn,
-                .DataRace,
-                .IteratorInvalidation,
-                .MixedBorrow,
-                .MemoryLeak,
-                .Deadlock,
-                .AlreadyInitialized,
-                .NotInitialized,
-                .ChannelClosed,
-                .AlreadySent,
-                .InvalidMove,
-                .StdAlternative,
-                .NullDereference,
-                .BufferOverflow,
-                .RawPattern,
-                .DivisionByZero,
-                .ShiftOverflow,
-                .RawPointerArithmetic,
-                .PtrCastWithoutAlign,
-                .UncheckedIndex => true,
+                .DoubleFree, .UseAfterFree, .UseAfterMove, .MutableAliasing, .PointerEscape, .StackUseAfterReturn, .DataRace, .IteratorInvalidation, .MixedBorrow, .MemoryLeak, .Deadlock, .AlreadyInitialized, .NotInitialized, .ChannelClosed, .AlreadySent, .InvalidMove, .StdAlternative, .NullDereference, .BufferOverflow, .RawPattern, .DivisionByZero, .ShiftOverflow, .RawPointerArithmetic, .PtrCastWithoutAlign, .UncheckedIndex => true,
             },
             .High => true,
         };
@@ -1927,8 +1922,8 @@ pub const Analyzer = struct {
     }
 
     fn analyzeWhile(self: *Analyzer, file_path: []const u8, ast: *const std.zig.Ast, node: zig.Ast.Node.Index) AnalyzeError!void {
-        const data = ast.nodes.items(.data)[@intFromEnum(node)];
-        const body = data.node_and_node[1];
+        const while_info = ast.fullWhile(node) orelse return;
+        const body = while_info.ast.then_expr;
 
         // For while loops, we analyze once conservatively
         // In a full implementation, we'd iterate to a fixed point
@@ -2017,15 +2012,30 @@ pub const Analyzer = struct {
                 const extra = ast.extra_data[@intFromEnum(data.extra_range.start)..@intFromEnum(data.extra_range.end)];
                 for (extra) |n| try self.findCallsInExpr(file_path, ast, @enumFromInt(n));
             },
-            .if_simple, .@"if" => {
+            .if_simple => {
                 const data = ast.nodes.items(.data)[@intFromEnum(node)];
                 try self.findCallsInExpr(file_path, ast, data.node_and_node[0]);
                 try self.findCallsInExpr(file_path, ast, data.node_and_node[1]);
             },
-            .while_simple, .while_cont => {
+            .@"if" => {
                 const data = ast.nodes.items(.data)[@intFromEnum(node)];
-                try self.findCallsInExpr(file_path, ast, data.node_and_node[0]);
-                try self.findCallsInExpr(file_path, ast, data.node_and_node[1]);
+                try self.findCallsInExpr(file_path, ast, data.node_and_extra[0]);
+                const extra = ast.extra_data[@intFromEnum(data.node_and_extra[1])..];
+                const then_body: zig.Ast.Node.Index = @enumFromInt(extra[0]);
+                try self.findCallsInExpr(file_path, ast, then_body);
+                const else_idx = extra[1];
+                if (else_idx != 0) {
+                    const else_body: zig.Ast.Node.Index = @enumFromInt(else_idx);
+                    try self.findCallsInExpr(file_path, ast, else_body);
+                }
+            },
+            .while_simple, .while_cont => {
+                const while_info = ast.fullWhile(node).?;
+                try self.findCallsInExpr(file_path, ast, while_info.ast.cond_expr);
+                if (while_info.ast.cont_expr.unwrap()) |cont| {
+                    try self.findCallsInExpr(file_path, ast, cont);
+                }
+                try self.findCallsInExpr(file_path, ast, while_info.ast.then_expr);
             },
             .@"try" => {
                 const data = ast.nodes.items(.data)[@intFromEnum(node)];
@@ -2194,10 +2204,7 @@ pub const Analyzer = struct {
                 const data = ast.nodes.items(.data)[@intFromEnum(node)];
                 try self.markReadsInExpr(file_path, ast, data.node_and_node[1]);
             },
-            .add, .add_wrap, .sub, .sub_wrap, .mul, .mul_wrap, .div, .mod,
-            .shl, .shl_sat, .shr, .bit_and, .bit_or, .bit_xor,
-            .bool_and, .bool_or, .equal_equal, .bang_equal, .less_than, .less_or_equal, .greater_than, .greater_or_equal,
-            .array_cat, .merge_error_sets => {
+            .add, .add_wrap, .sub, .sub_wrap, .mul, .mul_wrap, .div, .mod, .shl, .shl_sat, .shr, .bit_and, .bit_or, .bit_xor, .bool_and, .bool_or, .equal_equal, .bang_equal, .less_than, .less_or_equal, .greater_than, .greater_or_equal, .array_cat, .merge_error_sets => {
                 const data = ast.nodes.items(.data)[@intFromEnum(node)];
                 try self.markReadsInExpr(file_path, ast, data.node_and_node[0]);
                 try self.markReadsInExpr(file_path, ast, data.node_and_node[1]);
@@ -2242,9 +2249,12 @@ pub const Analyzer = struct {
                 }
             },
             .while_simple, .while_cont => {
-                const data = ast.nodes.items(.data)[@intFromEnum(node)];
-                try self.markReadsInExpr(file_path, ast, data.node_and_node[0]);
-                try self.markReadsInExpr(file_path, ast, data.node_and_node[1]);
+                const while_info = ast.fullWhile(node).?;
+                try self.markReadsInExpr(file_path, ast, while_info.ast.cond_expr);
+                if (while_info.ast.cont_expr.unwrap()) |cont| {
+                    try self.markReadsInExpr(file_path, ast, cont);
+                }
+                try self.markReadsInExpr(file_path, ast, while_info.ast.then_expr);
             },
             .@"while" => {
                 const while_info = ast.whileFull(node);
@@ -2367,10 +2377,7 @@ pub const Analyzer = struct {
             .field_access => try self.checkAsyncBoundaryExpr(file_path, ast, data.node_and_token[0]),
             .deref => try self.checkAsyncBoundaryExpr(file_path, ast, data.node),
             .address_of => try self.checkAsyncBoundaryExpr(file_path, ast, data.node),
-            .add, .add_wrap, .sub, .sub_wrap, .mul, .mul_wrap, .div, .mod,
-            .shl, .shl_sat, .shr, .bit_and, .bit_or, .bit_xor,
-            .bool_and, .bool_or, .equal_equal, .bang_equal, .less_than, .less_or_equal, .greater_than, .greater_or_equal,
-            .array_cat, .merge_error_sets => {
+            .add, .add_wrap, .sub, .sub_wrap, .mul, .mul_wrap, .div, .mod, .shl, .shl_sat, .shr, .bit_and, .bit_or, .bit_xor, .bool_and, .bool_or, .equal_equal, .bang_equal, .less_than, .less_or_equal, .greater_than, .greater_or_equal, .array_cat, .merge_error_sets => {
                 try self.checkAsyncBoundaryExpr(file_path, ast, data.node_and_node[0]);
                 try self.checkAsyncBoundaryExpr(file_path, ast, data.node_and_node[1]);
             },
@@ -2405,9 +2412,9 @@ const MethodKind = enum {
 
 fn methodKindFromName(name: []const u8) MethodKind {
     const names = &[_][]const u8{
-        "drop", "take", "deinit", "unsafePtr", "borrowMut", "destroy", "create",
-        "set", "get", "assumeInit", "write", "close", "send",
-        "lock", "readLock", "writeLock", "unlock", "readUnlock", "writeUnlock",
+        "drop",     "take",      "deinit",     "unsafePtr",  "borrowMut",   "destroy", "create",
+        "set",      "get",       "assumeInit", "write",      "close",       "send",    "lock",
+        "readLock", "writeLock", "unlock",     "readUnlock", "writeUnlock",
     };
     for (names, 0..) |n, i| {
         if (safe.SimdUtils.eql(name, n)) return @enumFromInt(i);

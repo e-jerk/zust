@@ -124,7 +124,7 @@ pub fn endsWith(haystack: []const u8, suffix: []const u8) bool {
     const start = haystack.len - suffix.len;
     var i: usize = 0;
     while (i + 32 <= suffix.len) {
-        const vh: Vec32 = haystack[start + i..][0..32].*;
+        const vh: Vec32 = haystack[start + i ..][0..32].*;
         const vs: Vec32 = suffix[i..][0..32].*;
         if (!@reduce(.And, vh == vs)) return false;
         i += 32;
@@ -132,7 +132,7 @@ pub fn endsWith(haystack: []const u8, suffix: []const u8) bool {
 
     const Vec16 = @Vector(16, u8);
     while (i + 16 <= suffix.len) {
-        const vh: Vec16 = haystack[start + i..][0..16].*;
+        const vh: Vec16 = haystack[start + i ..][0..16].*;
         const vs: Vec16 = suffix[i..][0..16].*;
         if (!@reduce(.And, vh == vs)) return false;
         i += 16;
@@ -233,7 +233,7 @@ pub fn findAnyByte(haystack: []const u8, needles: []const u8) ?usize {
             }
         }
         if (found) {
-            for (haystack[i..i + 32], i..) |b, j| {
+            for (haystack[i .. i + 32], i..) |b, j| {
                 for (needles) |n| {
                     if (b == n) return j;
                 }
@@ -258,7 +258,7 @@ pub fn findAnyByte(haystack: []const u8, needles: []const u8) ?usize {
             }
         }
         if (found) {
-            for (haystack[i..i + 16], i..) |b, j| {
+            for (haystack[i .. i + 16], i..) |b, j| {
                 for (needles) |n| {
                     if (b == n) return j;
                 }
@@ -400,7 +400,7 @@ pub fn findByteSet(haystack: []const u8, needles: []const u8) ?usize {
             }
         }
         if (found) {
-            for (haystack[i..i + 32], i..) |b, j| {
+            for (haystack[i .. i + 32], i..) |b, j| {
                 for (needles) |n| {
                     if (b == n) return j;
                 }
@@ -425,7 +425,7 @@ pub fn findByteSet(haystack: []const u8, needles: []const u8) ?usize {
             }
         }
         if (found) {
-            for (haystack[i..i + 16], i..) |b, j| {
+            for (haystack[i .. i + 16], i..) |b, j| {
                 for (needles) |n| {
                     if (b == n) return j;
                 }
@@ -525,7 +525,7 @@ pub fn contains(haystack: []const u8, needle: []const u8) bool {
     while (pos < haystack.len) {
         if (haystack[pos] == needle[needle.len - 1]) {
             const start = pos - (needle.len - 1);
-            if (eql(haystack[start..pos + 1], needle)) return true;
+            if (eql(haystack[start .. pos + 1], needle)) return true;
         }
         pos += skip_table[haystack[pos]];
     }
@@ -550,7 +550,7 @@ pub fn countSubstring(haystack: []const u8, needle: []const u8) u64 {
     while (pos < haystack.len) {
         if (haystack[pos] == needle[needle.len - 1]) {
             const start = pos - (needle.len - 1);
-            if (eql(haystack[start..pos + 1], needle)) {
+            if (eql(haystack[start .. pos + 1], needle)) {
                 count += 1;
                 pos += needle.len;
                 continue;
@@ -599,7 +599,7 @@ pub fn trimLeft(text: []const u8, chars: []const u8) []const u8 {
             }
         }
         if (!@reduce(.And, combined)) {
-            for (text[i..i + 32], i..) |b, j| {
+            for (text[i .. i + 32], i..) |b, j| {
                 var found = false;
                 for (chars) |c| {
                     if (b == c) {
@@ -628,7 +628,7 @@ pub fn trimLeft(text: []const u8, chars: []const u8) []const u8 {
             }
         }
         if (!@reduce(.And, combined)) {
-            for (text[i..i + 16], i..) |b, j| {
+            for (text[i .. i + 16], i..) |b, j| {
                 var found = false;
                 for (chars) |c| {
                     if (b == c) {

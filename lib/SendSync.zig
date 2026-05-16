@@ -4,7 +4,6 @@ const std = @import("std");
 ///
 /// Send: safe to move to another thread
 /// Sync: safe to share by reference between threads (&T from multiple threads)
-
 pub fn isSend(comptime T: type) bool {
     // Primitives are always Send
     const info = @typeInfo(T);

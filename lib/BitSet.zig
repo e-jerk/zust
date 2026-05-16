@@ -716,5 +716,4 @@ test "BitSet edge cases (size 1, size 65, size 128)" {
         defer comp.deinit();
         try std.testing.expect(!comp.any());
     }
-
 }
