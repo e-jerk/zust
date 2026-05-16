@@ -42,6 +42,9 @@ jobs:
       - name: Build release binary
         run: zig build -Doptimize=ReleaseSafe --summary all
 
+      - name: Build benchmarks
+        run: zig build bench --summary all
+
       - name: Upload binary artifact
         if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
@@ -68,6 +71,9 @@ jobs:
 
       - name: Build analyzer
         run: zig build --summary all
+
+      - name: Verify analyzer self-check
+        run: zig build analyze --summary all
 
       - name: Run analyzer on all source files (high strictness)
         run: |
@@ -99,6 +105,16 @@ jobs:
 
       - name: Build docs
         run: zig build docs --summary all || echo "No docs step defined"
+
+      - name: Verify README.md
+        run: |
+          test -f README.md || (echo "README.md not found" && exit 1)
+          lines=$(wc -l < README.md)
+          if [ "$lines" -le 1000 ]; then
+            echo "README.md is too short: $lines lines (expected >1000)"
+            exit 1
+          fi
+          echo "README.md verified: $lines lines"
 
   # ─────────────────────────────────────────
   # VS Code Extension Build
@@ -148,3 +164,33 @@ jobs:
 
       - name: Check formatting
         run: zig fmt --check lib/ analyzer/src/ tests/
+
+  # ─────────────────────────────────────────
+  # Cross-Compilation
+  # ─────────────────────────────────────────
+  cross-compile:
+    name: Cross-Compile
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-linux-gnu
+          - aarch64-linux-gnu
+          - x86_64-linux-musl
+          - wasm32-wasi
+          - x86_64-windows-gnu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build for target
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+
+      - name: Test for target
+        if: matrix.target == 'x86_64-linux-gnu' || matrix.target == 'x86_64-linux-musl'
+        run: zig build test -Dtarget=${{ matrix.target }}
