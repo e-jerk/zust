@@ -1,4 +1,5 @@
 const std = @import("std");
+const SimdUtils = @import("SimdUtils.zig");
 
 /// A growable UTF-8 string that owns its buffer.
 /// Similar to Rust's `String`.
@@ -65,21 +66,27 @@ pub const String = struct {
 
     /// Return true if the string starts with the given prefix.
     pub fn startsWith(self: *const Self, prefix: []const u8) bool {
-        return std.mem.startsWith(u8, self.slice(), prefix);
+        return SimdUtils.startsWith(self.slice(), prefix);
     }
 
     /// Return true if the string ends with the given suffix.
     pub fn endsWith(self: *const Self, suffix: []const u8) bool {
-        return std.mem.endsWith(u8, self.slice(), suffix);
+        return SimdUtils.endsWith(self.slice(), suffix);
     }
 
     /// Return true if the string contains the given substring.
     pub fn contains(self: *const Self, needle: []const u8) bool {
+        if (needle.len == 1) {
+            return SimdUtils.findByte(self.slice(), needle[0]) != null;
+        }
         return std.mem.indexOf(u8, self.slice(), needle) != null;
     }
 
     /// Return the index of the first occurrence of the substring, or null.
     pub fn find(self: *const Self, needle: []const u8) ?usize {
+        if (needle.len == 1) {
+            return SimdUtils.findByte(self.slice(), needle[0]);
+        }
         return std.mem.indexOf(u8, self.slice(), needle);
     }
 
