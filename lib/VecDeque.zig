@@ -1,5 +1,6 @@
 const std = @import("std");
 const Box = @import("Box.zig").Box;
+const SimdUtils = @import("SimdUtils.zig");
 
 /// A double-ended queue implemented with a growable ring buffer.
 /// Similar to Rust's `std::collections::VecDeque<T>`.
@@ -55,9 +56,16 @@ pub fn VecDeque(comptime T: type) type {
             const new_buf = try self.allocator.alloc(Box(T, 0, 0, 0), new_cap);
             @memset(new_buf, undefined);
 
-            var i: usize = 0;
-            while (i < self.len) : (i += 1) {
-                new_buf[i] = self.buffer[self.wrap(self.head + i)];
+            if (@sizeOf(T) == 1 and self.len >= 16 and self.head + self.len <= self.buffer.len) {
+                const byte_len = self.len * @sizeOf(Box(T, 0, 0, 0));
+                const src = @as([*]const u8, @ptrCast(&self.buffer[self.head]))[0..byte_len];
+                const dst = @as([*]u8, @ptrCast(new_buf))[0..byte_len];
+                SimdUtils.copy(dst, src);
+            } else {
+                var i: usize = 0;
+                while (i < self.len) : (i += 1) {
+                    new_buf[i] = self.buffer[self.wrap(self.head + i)];
+                }
             }
 
             self.allocator.free(self.buffer);
@@ -214,10 +222,19 @@ pub fn VecDeque(comptime T: type) type {
             // Need to reallocate and copy in order
             const new_buf = try self.allocator.alloc(Box(T, 0, 0, 0), self.buffer.len);
             @memset(new_buf, undefined);
-            var i: usize = 0;
-            while (i < self.len) : (i += 1) {
-                new_buf[i] = self.buffer[self.wrap(self.head + i)];
+
+            if (@sizeOf(T) == 1 and self.len >= 16 and self.head + self.len <= self.buffer.len) {
+                const byte_len = self.len * @sizeOf(Box(T, 0, 0, 0));
+                const src = @as([*]const u8, @ptrCast(&self.buffer[self.head]))[0..byte_len];
+                const dst = @as([*]u8, @ptrCast(new_buf))[0..byte_len];
+                SimdUtils.copy(dst, src);
+            } else {
+                var i: usize = 0;
+                while (i < self.len) : (i += 1) {
+                    new_buf[i] = self.buffer[self.wrap(self.head + i)];
+                }
             }
+
             self.allocator.free(self.buffer);
             self.buffer = new_buf;
             self.head = 0;
