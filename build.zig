@@ -97,10 +97,17 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("lib/RingBuffer.zig"));
     run_analyzer.addFileArg(b.path("lib/Stack.zig"));
     run_analyzer.addFileArg(b.path("lib/Pool.zig"));
+    run_analyzer.addFileArg(b.path("lib/SimdUtils.zig"));
     run_analyzer.addFileArg(b.path("lib/OffsetGuard.zig"));
     run_analyzer.addFileArg(b.path("lib/Allocator.zig"));
     run_analyzer.addFileArg(b.path("lib/Lifetime.zig"));
     run_analyzer.addFileArg(b.path("lib/TaggedUnion.zig"));
+    run_analyzer.addFileArg(b.path("lib/ThreadPool.zig"));
+    run_analyzer.addFileArg(b.path("lib/Semaphore.zig"));
+    run_analyzer.addFileArg(b.path("lib/Barrier.zig"));
+    run_analyzer.addFileArg(b.path("lib/LockFreeQueue.zig"));
+    run_analyzer.addFileArg(b.path("lib/AtomicCounter.zig"));
+    run_analyzer.addFileArg(b.path("lib/TimedLock.zig"));
     run_analyzer.addFileArg(b.path("lib/safe.zig"));
     // Analyzer files
     run_analyzer.addFileArg(b.path("analyzer/src/Analysis.zig"));
@@ -119,6 +126,41 @@ pub fn build(b: *std.Build) void {
 
     const analyze_step = b.step("analyze", "Run zust-analyzer on source files (dog-food check)");
     analyze_step.dependOn(&run_analyzer.step);
+
+    // HTTP server example
+    const http_example_mod = b.createModule(.{
+        .root_source_file = b.path("examples/http_server.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    http_example_mod.addImport("safe", safe_module);
+    // GuardedSlice is not yet re-exported from safe.zig, so we expose it
+    // as a separate module for the example.
+    const offsetguard_mod = b.createModule(.{
+        .root_source_file = b.path("lib/OffsetGuard.zig"),
+    });
+    http_example_mod.addImport("offsetguard", offsetguard_mod);
+    const http_example = b.addExecutable(.{
+        .name = "http_server",
+        .root_module = http_example_mod,
+    });
+    const http_step = b.step("http-example", "Build HTTP server example");
+    http_step.dependOn(&b.addInstallArtifact(http_example, .{}).step);
+
+    // Benchmark suite
+    const bench_step = b.step("bench", "Run benchmarks");
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("benchmarks/main.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_mod.addImport("safe", safe_module);
+    const bench_exe = b.addExecutable(.{
+        .name = "benchmarks",
+        .root_module = bench_mod,
+    });
+    const bench_run = b.addRunArtifact(bench_exe);
+    bench_step.dependOn(&bench_run.step);
 
     // Optional: make `zig build` also run the analyzer (uncomment to enable)
     // b.getInstallStep().dependOn(analyze_step);
