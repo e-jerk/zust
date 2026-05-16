@@ -1,0 +1,12 @@
+.{
+    .name = .zust,
+    .version = "0.1.0",
+    .fingerprint = 0x2486aa4f714cdeef,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "lib",
+        "README.md",
+    },
+    .dependencies = .{},
+}

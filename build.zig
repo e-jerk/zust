@@ -142,6 +142,11 @@ pub fn build(b: *std.Build) void {
     run_analyzer.addFileArg(b.path("lib/LockHierarchy.zig"));
     run_analyzer.addFileArg(b.path("lib/RwLock2.zig"));
     run_analyzer.addFileArg(b.path("lib/BloomFilter.zig"));
+    run_analyzer.addFileArg(b.path("lib/BTreeSet.zig"));
+    run_analyzer.addFileArg(b.path("lib/PathBuf.zig"));
+    run_analyzer.addFileArg(b.path("lib/Duration.zig"));
+    run_analyzer.addFileArg(b.path("lib/CString.zig"));
+    run_analyzer.addFileArg(b.path("lib/Condvar.zig"));
     run_analyzer.addFileArg(b.path("lib/safe.zig"));
     // Analyzer files
     run_analyzer.addFileArg(b.path("analyzer/src/Analysis.zig"));
@@ -244,6 +249,20 @@ pub fn build(b: *std.Build) void {
     // Transpiler build step
     const transpile_step = b.step("transpile", "Build transpiler tool");
     transpile_step.dependOn(&b.addInstallArtifact(transpiler_exe, .{}).step);
+
+    // Documentation generator
+    const docs_step = b.step("docs", "Generate documentation site");
+    const docs_mod = b.createModule(.{
+        .root_source_file = b.path("docs/generate.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const docs_exe = b.addExecutable(.{
+        .name = "generate-docs",
+        .root_module = docs_mod,
+    });
+    const docs_run = b.addRunArtifact(docs_exe);
+    docs_step.dependOn(&docs_run.step);
 
     // Optional: make `zig build` also run the analyzer (uncomment to enable)
     // b.getInstallStep().dependOn(analyze_step);
