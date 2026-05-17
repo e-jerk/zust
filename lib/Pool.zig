@@ -10,7 +10,7 @@ pub fn Pool(comptime T: type) type {
     return struct {
         buffer: []Slot,
         free_list: std.ArrayList(usize),
-        allocator: std.mem.Allocator,
+        _allocator: std.mem.Allocator,
 
         const Slot = struct {
             value: T,
@@ -32,13 +32,13 @@ pub fn Pool(comptime T: type) type {
             return .{
                 .buffer = buf,
                 .free_list = free_list,
-                .allocator = allocator,
+                ._allocator = allocator,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.allocator.free(self.buffer);
-            self.free_list.deinit(self.allocator);
+            self._allocator.free(self.buffer);
+            self.free_list.deinit(self._allocator);
         }
 
         /// Acquire a slot from the pool. Returns null if pool is exhausted.
@@ -53,7 +53,7 @@ pub fn Pool(comptime T: type) type {
         pub fn release(self: *Self, box: PoolBox(T)) void {
             if (self.buffer[box.index].in_use) {
                 self.buffer[box.index].in_use = false;
-                self.free_list.append(self.allocator, box.index) catch {};
+                self.free_list.append(self._allocator, box.index) catch {};
             }
         }
 
@@ -100,16 +100,21 @@ pub fn FixedVec(comptime T: type) type {
     return struct {
         buffer: []T,
         len: usize,
+        _allocator: std.mem.Allocator,
 
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator, cap: usize) !Self {
             const buf = try allocator.alloc(T, cap);
-            return .{ .buffer = buf, .len = 0 };
+            return .{
+                .buffer = buf,
+                .len = 0,
+                ._allocator = allocator,
+            };
         }
 
-        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            allocator.free(self.buffer);
+        pub fn deinit(self: *Self) void {
+            self._allocator.free(self.buffer);
         }
 
         pub fn append(self: *Self, value: T) !void {
@@ -184,7 +189,7 @@ test "Pool exhaust and null" {
 
 test "FixedVec append and pop" {
     var vec = try FixedVec(u32).init(std.testing.allocator, 4);
-    defer vec.deinit(std.testing.allocator);
+    defer vec.deinit();
 
     try vec.append(10);
     try vec.append(20);
@@ -201,7 +206,7 @@ test "FixedVec append and pop" {
 
 test "FixedVec capacity limit" {
     var vec = try FixedVec(u32).init(std.testing.allocator, 2);
-    defer vec.deinit(std.testing.allocator);
+    defer vec.deinit();
 
     try vec.append(1);
     try vec.append(2);

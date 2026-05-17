@@ -19,7 +19,7 @@ pub fn Cow(comptime T: type) type {
 
     return struct {
         value: T,
-        allocator: ?std.mem.Allocator,
+        _allocator: ?std.mem.Allocator,
         owned: bool,
 
         const Self = @This();
@@ -28,7 +28,7 @@ pub fn Cow(comptime T: type) type {
         pub fn initBorrowed(value: T) Self {
             return .{
                 .value = value,
-                .allocator = null,
+                ._allocator = null,
                 .owned = false,
             };
         }
@@ -36,17 +36,17 @@ pub fn Cow(comptime T: type) type {
         /// Wrap an owned value (clones the input).
         pub fn initOwned(allocator: std.mem.Allocator, value: T) !Self {
             if (is_string) {
-                const copy = try value.clone(allocator);
+                const copy = try value.clone();
                 return .{
                     .value = copy,
-                    .allocator = allocator,
+                    ._allocator = allocator,
                     .owned = true,
                 };
             } else {
                 const copy = try allocator.dupe(u8, value);
                 return .{
                     .value = copy,
-                    .allocator = allocator,
+                    ._allocator = allocator,
                     .owned = true,
                 };
             }
@@ -55,7 +55,7 @@ pub fn Cow(comptime T: type) type {
         /// Free the owned value if we own it.
         pub fn deinit(self: *Self) void {
             if (self.owned) {
-                if (self.allocator) |alloc| {
+                if (self._allocator) |alloc| {
                     if (is_string) {
                         self.value.deinit();
                     } else {
@@ -72,25 +72,30 @@ pub fn Cow(comptime T: type) type {
         }
 
         /// Ensure the value is owned, cloning if it was borrowed.
-        /// Returns the owned value; the Cow is also updated to own it.
-        pub fn toOwned(self: *Self, allocator: std.mem.Allocator) !T {
+        /// Uses the stored allocator from initOwned. Returns error.NoAllocator if none was set.
+        pub fn toOwned(self: *Self) !T {
             if (self.owned) {
                 return self.value;
             }
 
+            const alloc = self._allocator orelse return error.NoAllocator;
+
             if (is_string) {
-                const copy = try self.value.clone(allocator);
+                const copy = try self.value.clone();
                 self.value = copy;
-                self.allocator = allocator;
                 self.owned = true;
                 return copy;
             } else {
-                const copy = try allocator.dupe(u8, self.value);
+                const copy = try alloc.dupe(u8, self.value);
                 self.value = copy;
-                self.allocator = allocator;
                 self.owned = true;
                 return copy;
             }
+        }
+
+        /// Set the allocator for a borrowed Cow, enabling toOwned() later.
+        pub fn setAllocator(self: *Self, allocator: std.mem.Allocator) void {
+            self._allocator = allocator;
         }
 
         /// Return true if the value is currently borrowed.
@@ -127,7 +132,8 @@ test "Cow([]const u8) toOwned clones borrowed" {
 
     try std.testing.expect(cow.isBorrowed());
 
-    const owned = try cow.toOwned(std.testing.allocator);
+    cow.setAllocator(std.testing.allocator);
+    const owned = try cow.toOwned();
     // cow is now owned and will clean up in defer;
     // `owned` points to the same allocation, so don't free separately.
     try std.testing.expect(!cow.isBorrowed());
@@ -159,7 +165,8 @@ test "Cow(String) borrowed toOwned clones" {
 
     try std.testing.expect(cow.isBorrowed());
 
-    const owned = try cow.toOwned(std.testing.allocator);
+    cow.setAllocator(std.testing.allocator);
+    const owned = try cow.toOwned();
     _ = owned;
 
     try std.testing.expect(!cow.isBorrowed());

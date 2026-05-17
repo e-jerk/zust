@@ -8,7 +8,7 @@ const BoxStateful = @import("Box.zig").BoxStateful;
 pub fn BTreeMap(comptime T: type) type {
     return struct {
         root: ?Box(Node),
-        allocator: std.mem.Allocator,
+        _allocator: std.mem.Allocator,
         count: usize,
         outstanding_imm: u32 = 0,
         outstanding_mut: u32 = 0,
@@ -25,7 +25,7 @@ pub fn BTreeMap(comptime T: type) type {
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
                 .root = null,
-                .allocator = allocator,
+                ._allocator = allocator,
                 .count = 0,
             };
         }
@@ -59,7 +59,7 @@ pub fn BTreeMap(comptime T: type) type {
             if (self.outstanding_mut > 0) {
                 @panic("cannot put while BTreeMap is mutably borrowed");
             }
-            self.root = try insertNode(self.allocator, self.root, key, value_box, &self.count);
+            self.root = try insertNode(self._allocator, self.root, key, value_box, &self.count);
         }
 
         fn insertNode(allocator: std.mem.Allocator, maybe_box: ?Box(Node), key: u64, value: Box(T), count: *usize) !?Box(Node) {
@@ -166,11 +166,11 @@ pub fn BTreeMap(comptime T: type) type {
             return .{ .map = self };
         }
 
-        pub fn rangeKeys(self: *const Self, range_min: u64, range_max: u64, allocator: std.mem.Allocator) !std.ArrayList(u64) {
+        pub fn rangeKeys(self: *const Self, range_min: u64, range_max: u64) !std.ArrayList(u64) {
             var result: std.ArrayList(u64) = .empty;
-            errdefer result.deinit(allocator);
+            errdefer result.deinit(self._allocator);
             if (self.root) |root| {
-                try rangeKeysNode(root, range_min, range_max, allocator, &result);
+                try rangeKeysNode(root, range_min, range_max, self._allocator, &result);
             }
             return result;
         }
@@ -447,7 +447,7 @@ test "BTreeMap rangeKeys" {
     try map.put(2, try Box(i32).init(std.testing.allocator, 200));
     try map.put(4, try Box(i32).init(std.testing.allocator, 400));
 
-    var keys = try map.rangeKeys(2, 4, std.testing.allocator);
+    var keys = try map.rangeKeys(2, 4);
     defer keys.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 3), keys.items.len);

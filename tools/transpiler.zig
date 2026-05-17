@@ -11,7 +11,7 @@ const safe = @import("safe");
 /// - safe.CheckedInt for position tracking
 /// - All heap allocations properly deinit'd
 pub const Transpiler = struct {
-    allocator: std.mem.Allocator,
+    _allocator: std.mem.Allocator,
     source: safe.String,
     ast: ?std.zig.Ast,
     edits: std.ArrayList(Edit),
@@ -21,7 +21,7 @@ pub const Transpiler = struct {
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
-            .allocator = allocator,
+            ._allocator = allocator,
             .source = safe.String.init(allocator),
             .ast = null,
             .edits = std.ArrayList(Edit).empty,
@@ -29,16 +29,16 @@ pub const Transpiler = struct {
         };
     }
 
-    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Self) void {
         // Clean up AST if present
         if (self.ast) |*ast| {
-            ast.deinit(allocator);
+            ast.deinit(self._allocator);
         }
         // Clean up edit replacements (each replacement is heap-allocated)
         for (self.edits.items) |edit| {
-            allocator.free(edit.replacement);
+            self._allocator.free(edit.replacement);
         }
-        self.edits.deinit(allocator);
+        self.edits.deinit(self._allocator);
         // Clean up strings
         self.source.deinit();
         self.result.deinit();
@@ -118,7 +118,7 @@ pub const Transpiler = struct {
 
     /// Add an edit. The replacement slice must be heap-allocated; ownership is transferred.
     fn addEdit(self: *Self, start: usize, end: usize, replacement: []const u8) !void {
-        try self.edits.append(self.allocator, .{
+        try self.edits.append(self._allocator, .{
             .start = start,
             .end = end,
             .replacement = replacement,
@@ -181,7 +181,7 @@ pub const Transpiler = struct {
                 const type_text = source[type_span.start..type_span.end];
 
                 const call_span = ast.nodeToSpan(node);
-                const repl = try std.fmt.allocPrint(self.allocator, "safe.Box({s}).init(allocator, undefined)", .{type_text});
+                const repl = try std.fmt.allocPrint(self._allocator, "safe.Box({s}).init(allocator, undefined)", .{type_text});
                 try self.addEdit(call_span.start, call_span.end, repl);
             }
         }
@@ -196,7 +196,7 @@ pub const Transpiler = struct {
                 const type_text = source[type_span.start..type_span.end];
 
                 const call_span = ast.nodeToSpan(node);
-                const repl = try std.fmt.allocPrint(self.allocator, "safe.ArrayList({s})", .{type_text});
+                const repl = try std.fmt.allocPrint(self._allocator, "safe.ArrayList({s})", .{type_text});
                 try self.addEdit(call_span.start, call_span.end, repl);
             }
         }
@@ -211,7 +211,7 @@ pub const Transpiler = struct {
                 const type_text = source[type_span.start..type_span.end];
 
                 const call_span = ast.nodeToSpan(node);
-                const repl = try std.fmt.allocPrint(self.allocator, "safe.HashMap(safe.String, {s})", .{type_text});
+                const repl = try std.fmt.allocPrint(self._allocator, "safe.HashMap(safe.String, {s})", .{type_text});
                 try self.addEdit(call_span.start, call_span.end, repl);
             }
         }
@@ -219,14 +219,14 @@ pub const Transpiler = struct {
         // Pattern: std.mem.eql → safe.SimdUtils.eql
         if (std.mem.eql(u8, fn_text, "std.mem.eql") or std.mem.eql(u8, fn_text, "mem.eql")) {
             const call_span = ast.nodeToSpan(node);
-            const repl = try std.fmt.allocPrint(self.allocator, "safe.SimdUtils.eql", .{});
+            const repl = try std.fmt.allocPrint(self._allocator, "safe.SimdUtils.eql", .{});
             try self.addEdit(call_span.start, call_span.end, repl);
         }
 
         // Pattern: std.mem.copy → safe.SimdUtils.copy
         if (std.mem.eql(u8, fn_text, "std.mem.copy") or std.mem.eql(u8, fn_text, "mem.copy")) {
             const call_span = ast.nodeToSpan(node);
-            const repl = try std.fmt.allocPrint(self.allocator, "safe.SimdUtils.copy", .{});
+            const repl = try std.fmt.allocPrint(self._allocator, "safe.SimdUtils.copy", .{});
             try self.addEdit(call_span.start, call_span.end, repl);
         }
 
@@ -237,7 +237,7 @@ pub const Transpiler = struct {
             while (line_start > 0 and source[line_start - 1] != '\n') {
                 line_start -= 1;
             }
-            const repl = try std.fmt.allocPrint(self.allocator, "// zust: use safe.String or safe.GuardedSlice for slice operations\n", .{});
+            const repl = try std.fmt.allocPrint(self._allocator, "// zust: use safe.String or safe.GuardedSlice for slice operations\n", .{});
             try self.addEdit(line_start, line_start, repl);
         }
 
@@ -254,7 +254,7 @@ pub const Transpiler = struct {
             }
             if (has_pointer) {
                 const call_span = ast.nodeToSpan(node);
-                const repl = try std.fmt.allocPrint(self.allocator, "// zust: never print raw pointer addresses\n    std.debug.print(\"hidden\\n\", .{{}})", .{});
+                const repl = try std.fmt.allocPrint(self._allocator, "// zust: never print raw pointer addresses\n    std.debug.print(\"hidden\\n\", .{{}})", .{});
                 try self.addEdit(call_span.start, call_span.end, repl);
             }
         }
@@ -262,7 +262,7 @@ pub const Transpiler = struct {
         // Pattern: allocator.free(slice)  →  no-op (safe types own their memory)
         if (std.mem.eql(u8, fn_text, "free") or std.mem.endsWith(u8, fn_text, ".free")) {
             const call_span = ast.nodeToSpan(node);
-            const repl = try std.fmt.allocPrint(self.allocator, "// safe-transpile: free removed (memory owned by safe type)", .{});
+            const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: free removed (memory owned by safe type)", .{});
             try self.addEdit(call_span.start, call_span.end, repl);
         }
     }
@@ -275,19 +275,19 @@ pub const Transpiler = struct {
         const text = source[span.start..span.end];
 
         if (std.mem.eql(u8, text, "std.Thread.Mutex")) {
-            const repl = try std.fmt.allocPrint(self.allocator, "safe.Mutex(void)", .{});
+            const repl = try std.fmt.allocPrint(self._allocator, "safe.Mutex(void)", .{});
             try self.addEdit(span.start, span.end, repl);
         }
 
         // Pattern: std.heap.page_allocator → safe.Pool
         if (std.mem.eql(u8, text, "std.heap.page_allocator")) {
-            const repl = try std.fmt.allocPrint(self.allocator, "safe.Pool", .{});
+            const repl = try std.fmt.allocPrint(self._allocator, "safe.Pool", .{});
             try self.addEdit(span.start, span.end, repl);
         }
 
         // Pattern: std.heap.raw_c_allocator → safe.Pool
         if (std.mem.eql(u8, text, "std.heap.raw_c_allocator")) {
-            const repl = try std.fmt.allocPrint(self.allocator, "safe.Pool", .{});
+            const repl = try std.fmt.allocPrint(self._allocator, "safe.Pool", .{});
             try self.addEdit(span.start, span.end, repl);
         }
     }
@@ -305,17 +305,17 @@ pub const Transpiler = struct {
             const type_text = source[type_span.start..type_span.end];
 
             if (std.mem.eql(u8, type_text, "[]u8") or std.mem.eql(u8, type_text, "[]const u8")) {
-                const repl = try std.fmt.allocPrint(self.allocator, "safe.Slice(u8)", .{});
+                const repl = try std.fmt.allocPrint(self._allocator, "safe.Slice(u8)", .{});
                 try self.addEdit(type_span.start, type_span.end, repl);
             }
 
             if (vd.ast.init_node == .none) {
                 const after_type = type_span.end;
                 if (isIntType(type_text)) {
-                    const repl = try std.fmt.allocPrint(self.allocator, " = safe.CheckedInt({s}).init(0)", .{type_text});
+                    const repl = try std.fmt.allocPrint(self._allocator, " = safe.CheckedInt({s}).init(0)", .{type_text});
                     try self.addEdit(after_type, after_type, repl);
                 } else {
-                    const repl = try std.fmt.allocPrint(self.allocator, " = undefined", .{});
+                    const repl = try std.fmt.allocPrint(self._allocator, " = undefined", .{});
                     try self.addEdit(after_type, after_type, repl);
                 }
             }
@@ -333,7 +333,7 @@ pub const Transpiler = struct {
                     const inner_name = ast.tokenSlice(ast.nodeMainToken(inner));
 
                     if (self.isPointerUsedLater(ptr_name, decl_span.end)) {
-                        const repl = try std.fmt.allocPrint(self.allocator, "var {s} = try safe.OffsetPtr.init(allocator, &{s}); defer {s}.deinit()", .{ ptr_name, inner_name, ptr_name });
+                        const repl = try std.fmt.allocPrint(self._allocator, "var {s} = try safe.OffsetPtr.init(allocator, &{s}); defer {s}.deinit()", .{ ptr_name, inner_name, ptr_name });
                         try self.addEdit(decl_span.start, decl_span.end, repl);
                     }
                 }
@@ -349,7 +349,7 @@ pub const Transpiler = struct {
             const for_info = ast.forFull(node);
             if (for_info.ast.inputs.len >= 2) {
                 const span = ast.nodeToSpan(node);
-                const repl = try std.fmt.allocPrint(self.allocator, "// safe-transpile: for with index access requires manual review\n    ", .{});
+                const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: for with index access requires manual review\n    ", .{});
                 try self.addEdit(span.start, span.start, repl);
             }
         }
@@ -386,7 +386,7 @@ pub const Transpiler = struct {
         const while_pos = ast.tokens.items(.start)[while_token];
 
         // Insert counter declaration before while
-        const decl_repl = try std.fmt.allocPrint(self.allocator, "var __zust_loop_counter: u64 = 0;\n    ", .{});
+        const decl_repl = try std.fmt.allocPrint(self._allocator, "var __zust_loop_counter: u64 = 0;\n    ", .{});
         try self.addEdit(while_pos, while_pos, decl_repl);
 
         // Insert guard inside body if it's a block
@@ -396,7 +396,7 @@ pub const Transpiler = struct {
             const lbrace_token = ast.nodeMainToken(body_expr);
             const lbrace_pos = ast.tokens.items(.start)[lbrace_token];
             if (lbrace_pos < source.len and source[lbrace_pos] == '{') {
-                const guard_repl = try std.fmt.allocPrint(self.allocator, "\n        __zust_loop_counter += 1;\n        if (__zust_loop_counter > 1_000_000) return error.InfiniteLoop;\n        ", .{});
+                const guard_repl = try std.fmt.allocPrint(self._allocator, "\n        __zust_loop_counter += 1;\n        if (__zust_loop_counter > 1_000_000) return error.InfiniteLoop;\n        ", .{});
                 try self.addEdit(lbrace_pos + 1, lbrace_pos + 1, guard_repl);
             }
         }
@@ -413,7 +413,7 @@ pub const Transpiler = struct {
         const inner_span = ast.nodeToSpan(inner);
         const inner_text = source[inner_span.start..inner_span.end];
 
-        const repl = try std.fmt.allocPrint(self.allocator,
+        const repl = try std.fmt.allocPrint(self._allocator,
             \\if ({s}) |value| {{
             \\    value
             \\}} else {{
@@ -450,7 +450,7 @@ pub const Transpiler = struct {
                     const param_text = source[param_span.start..param_span.end];
 
                     const defer_span = ast.nodeToSpan(node);
-                    const repl = try std.fmt.allocPrint(self.allocator, "defer _ = {s}.deinit()", .{param_text});
+                    const repl = try std.fmt.allocPrint(self._allocator, "defer _ = {s}.deinit()", .{param_text});
                     try self.addEdit(defer_span.start, defer_span.end, repl);
                 }
             }
@@ -468,7 +468,7 @@ pub const Transpiler = struct {
         const unsafe_builtins = &[_][]const u8{ "@ptrCast", "@alignCast", "@intToPtr", "@ptrToInt", "@bitCast" };
         for (unsafe_builtins) |name| {
             if (std.mem.eql(u8, builtin_name, name)) {
-                const repl = try std.fmt.allocPrint(self.allocator, "// safe-transpile: {s} requires manual review\n    {s}", .{ name, builtin_name });
+                const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: {s} requires manual review\n    {s}", .{ name, builtin_name });
                 try self.addEdit(span.start, span.end, repl);
                 break;
             }
@@ -480,7 +480,7 @@ pub const Transpiler = struct {
             while (line_start > 0 and source[line_start - 1] != '\n') {
                 line_start -= 1;
             }
-            const repl = try std.fmt.allocPrint(self.allocator, "// safe-transpile: {s} requires manual review — consider safe.CheckedInt(T).init({s})\n", .{ builtin_name, builtin_name });
+            const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: {s} requires manual review — consider safe.CheckedInt(T).init({s})\n", .{ builtin_name, builtin_name });
             try self.addEdit(line_start, line_start, repl);
         }
     }
@@ -495,7 +495,7 @@ pub const Transpiler = struct {
 
         // @memcpy(dest, src) → safe.SimdUtils.copy
         if (std.mem.eql(u8, builtin_name, "@memcpy")) {
-            const repl = try std.fmt.allocPrint(self.allocator, "safe.SimdUtils.copy", .{});
+            const repl = try std.fmt.allocPrint(self._allocator, "safe.SimdUtils.copy", .{});
             try self.addEdit(span.start, span.end, repl);
             return;
         }
@@ -510,7 +510,7 @@ pub const Transpiler = struct {
                 const value_span = ast.nodeToSpan(value_node);
                 const t_text = source[t_span.start..t_span.end];
                 const value_text = source[value_span.start..value_span.end];
-                const repl = try std.fmt.allocPrint(self.allocator, "safe.CheckedInt({s}).init({s}({s}, {s}))", .{ t_text, builtin_name, t_text, value_text });
+                const repl = try std.fmt.allocPrint(self._allocator, "safe.CheckedInt({s}).init({s}({s}, {s}))", .{ t_text, builtin_name, t_text, value_text });
                 try self.addEdit(span.start, span.end, repl);
                 return;
             }
@@ -519,13 +519,13 @@ pub const Transpiler = struct {
             while (line_start > 0 and source[line_start - 1] != '\n') {
                 line_start -= 1;
             }
-            const repl = try std.fmt.allocPrint(self.allocator, "// safe-transpile: {s} requires manual review — consider safe.CheckedInt(T).init({s})\n", .{ builtin_name, builtin_name });
+            const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: {s} requires manual review — consider safe.CheckedInt(T).init({s})\n", .{ builtin_name, builtin_name });
             try self.addEdit(line_start, line_start, repl);
             return;
         }
 
         if (std.mem.eql(u8, builtin_name, "@bitCast")) {
-            const repl = try std.fmt.allocPrint(self.allocator, "// safe-transpile: {s} requires manual review\n    {s}", .{ builtin_name, builtin_name });
+            const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: {s} requires manual review\n    {s}", .{ builtin_name, builtin_name });
             try self.addEdit(span.start, span.end, repl);
         }
     }
@@ -623,7 +623,7 @@ test "pattern 1: allocator.create/destroy → safe.Box" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -645,7 +645,7 @@ test "pattern 2: std.ArrayList → safe.ArrayList" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -665,7 +665,7 @@ test "pattern 3: std.StringHashMap → safe.HashMap" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -683,7 +683,7 @@ test "pattern 5: raw optional dereference → checked access" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -702,7 +702,7 @@ test "pattern 6: uninitialized var → safe.CheckedInt" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -720,7 +720,7 @@ test "no changes for safe code" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -739,7 +739,7 @@ test "pattern: std.heap.page_allocator → safe.Pool" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -755,7 +755,7 @@ test "transpiler dog-food: safe types prevent leaks" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     // The transpiler itself uses safe types internally,
     // so if we forget to deinit, the analyzer catches it.
@@ -776,7 +776,7 @@ test "pattern: []u8 type → safe.Slice(u8)" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -794,7 +794,7 @@ test "pattern: []const u8 type → safe.Slice(u8)" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -813,7 +813,7 @@ test "pattern: @memcpy → safe.SimdUtils.copy" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -831,7 +831,7 @@ test "pattern: std.mem.eql → safe.SimdUtils.eql" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -851,7 +851,7 @@ test "pattern: std.mem.copy → safe.SimdUtils.copy" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -868,7 +868,7 @@ test "pattern: @intCast gets manual review comment" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -885,7 +885,7 @@ test "pattern: @truncate gets manual review comment" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -902,7 +902,7 @@ test "pattern: @bitCast gets manual review comment" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -923,7 +923,7 @@ test "pattern: for with index access gets warning comment" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -942,7 +942,7 @@ test "pattern: const ptr = &value → safe.OffsetPtr when used" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -962,7 +962,7 @@ test "pattern: const ptr = &value skipped when unused" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -983,7 +983,7 @@ test "pattern: while (true) gets iteration limit" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -1003,7 +1003,7 @@ test "pattern: std.mem.indexOf gets comment" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -1022,7 +1022,7 @@ test "pattern: std.heap.raw_c_allocator → safe.Pool" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -1040,7 +1040,7 @@ test "pattern: std.debug.print with pointer gets redacted" {
     ;
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
@@ -1070,7 +1070,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(input);
 
     var transpiler = Transpiler.init(allocator);
-    defer transpiler.deinit(allocator);
+    defer transpiler.deinit();
 
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);

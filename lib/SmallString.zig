@@ -17,7 +17,7 @@ pub fn SmallString(comptime inline_capacity: usize) type {
         heap_len: usize,
         heap_cap: usize,
 
-        allocator: ?std.mem.Allocator,
+        _allocator: ?std.mem.Allocator,
 
         const Self = @This();
 
@@ -28,7 +28,7 @@ pub fn SmallString(comptime inline_capacity: usize) type {
                 .heap_ptr = null,
                 .heap_len = 0,
                 .heap_cap = 0,
-                .allocator = null,
+                ._allocator = null,
             };
         }
 
@@ -48,7 +48,7 @@ pub fn SmallString(comptime inline_capacity: usize) type {
 
         pub fn initWithAlloc(allocator: std.mem.Allocator, data: []const u8) !Self {
             var self = init();
-            self.allocator = allocator;
+            self._allocator = allocator;
             if (data.len <= inline_capacity) {
                 @memcpy(self.inline_buf[0..data.len], data);
                 self.inline_len = @intCast(data.len);
@@ -65,7 +65,7 @@ pub fn SmallString(comptime inline_capacity: usize) type {
 
         pub fn deinit(self: *Self) void {
             if (self.heap_ptr) |ptr| {
-                if (self.allocator) |alloc| {
+                if (self._allocator) |alloc| {
                     alloc.free(ptr);
                 }
                 self.heap_ptr = null;
@@ -107,7 +107,7 @@ pub fn SmallString(comptime inline_capacity: usize) type {
                 self.inline_len = @intCast(new_len);
             } else {
                 // Move to heap
-                if (self.allocator) |alloc| {
+                if (self._allocator) |alloc| {
                     const new_cap = new_len * 2;
                     const new_heap = try alloc.alloc(u8, new_cap);
 
@@ -132,8 +132,11 @@ pub fn SmallString(comptime inline_capacity: usize) type {
             try self.append(&[_]u8{char});
         }
 
-        pub fn clone(self: *Self, allocator: std.mem.Allocator) !Self {
-            return try initWithAlloc(allocator, self.slice());
+        pub fn clone(self: *Self) !Self {
+            if (self._allocator) |alloc| {
+                return try initWithAlloc(alloc, self.slice());
+            }
+            return error.NoAllocator;
         }
 
         pub fn clear(self: *Self) void {

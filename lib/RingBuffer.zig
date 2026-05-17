@@ -7,7 +7,7 @@ const SimdUtils = @import("SimdUtils.zig");
 /// Usage:
 /// ```zig
 /// var rb = try RingBuffer(u8).init(allocator, 1024);
-/// defer rb.deinit(allocator);
+/// defer rb.deinit();
 /// try rb.write(&[_]u8{1, 2, 3});
 /// const data = rb.read(2).?; // returns 2 bytes
 /// ```
@@ -17,6 +17,7 @@ pub fn RingBuffer(comptime T: type) type {
         head: usize, // Read position
         tail: usize, // Write position
         count: usize, // Number of items in buffer
+        _allocator: std.mem.Allocator,
 
         const Self = @This();
 
@@ -27,11 +28,12 @@ pub fn RingBuffer(comptime T: type) type {
                 .head = 0,
                 .tail = 0,
                 .count = 0,
+                ._allocator = allocator,
             };
         }
 
-        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            allocator.free(self.buffer);
+        pub fn deinit(self: *Self) void {
+            self._allocator.free(self.buffer);
         }
 
         pub fn capacity(self: *Self) usize {
@@ -156,7 +158,7 @@ pub fn RingBuffer(comptime T: type) type {
 
 test "RingBuffer write and read" {
     var rb = try RingBuffer(u8).init(std.testing.allocator, 4);
-    defer rb.deinit(std.testing.allocator);
+    defer rb.deinit();
 
     try rb.write(1);
     try rb.write(2);
@@ -171,7 +173,7 @@ test "RingBuffer write and read" {
 
 test "RingBuffer wrap-around" {
     var rb = try RingBuffer(u8).init(std.testing.allocator, 4);
-    defer rb.deinit(std.testing.allocator);
+    defer rb.deinit();
 
     // Fill buffer
     try rb.write(10);
@@ -197,7 +199,7 @@ test "RingBuffer wrap-around" {
 
 test "RingBuffer isFull and isEmpty" {
     var rb = try RingBuffer(u8).init(std.testing.allocator, 2);
-    defer rb.deinit(std.testing.allocator);
+    defer rb.deinit();
 
     try std.testing.expect(rb.isEmpty());
     try std.testing.expect(!rb.isFull());
@@ -221,7 +223,7 @@ test "RingBuffer isFull and isEmpty" {
 
 test "RingBuffer writeOverwrite" {
     var rb = try RingBuffer(u8).init(std.testing.allocator, 3);
-    defer rb.deinit(std.testing.allocator);
+    defer rb.deinit();
 
     rb.writeOverwrite(1);
     rb.writeOverwrite(2);
@@ -241,7 +243,7 @@ test "RingBuffer writeOverwrite" {
 
 test "RingBuffer readableSlice" {
     var rb = try RingBuffer(u8).init(std.testing.allocator, 8);
-    defer rb.deinit(std.testing.allocator);
+    defer rb.deinit();
 
     // Empty
     try std.testing.expectEqual(rb.readableSlice().len, 0);

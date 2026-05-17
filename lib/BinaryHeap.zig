@@ -9,7 +9,7 @@ const Box = @import("Box.zig").Box;
 pub fn BinaryHeap(comptime T: type) type {
     return struct {
         items: std.ArrayList(Box(T)),
-        allocator: std.mem.Allocator,
+        _allocator: std.mem.Allocator,
         compare: *const fn (*const T, *const T) bool,
 
         const Self = @This();
@@ -17,7 +17,7 @@ pub fn BinaryHeap(comptime T: type) type {
         pub fn init(allocator: std.mem.Allocator, compare: *const fn (*const T, *const T) bool) Self {
             return .{
                 .items = std.ArrayList(Box(T)).empty,
-                .allocator = allocator,
+                ._allocator = allocator,
                 .compare = compare,
             };
         }
@@ -27,11 +27,11 @@ pub fn BinaryHeap(comptime T: type) type {
                 const dead = box.deinit();
                 _ = dead;
             }
-            self.items.deinit(self.allocator);
+            self.items.deinit(self._allocator);
         }
 
         pub fn push(self: *Self, box: Box(T)) !void {
-            try self.items.append(self.allocator, box);
+            try self.items.append(self._allocator, box);
             siftUp(self, self.items.items.len - 1);
         }
 
@@ -66,17 +66,17 @@ pub fn BinaryHeap(comptime T: type) type {
             return self.items.items[0].unsafePtr();
         }
 
-        pub fn drainSorted(self: *Self, allocator: std.mem.Allocator) !std.ArrayList(Box(T)) {
+        pub fn drainSorted(self: *Self) !std.ArrayList(Box(T)) {
             var result: std.ArrayList(Box(T)) = .empty;
             errdefer {
                 for (result.items) |box| {
                     const dead = box.deinit();
                     _ = dead;
                 }
-                result.deinit(allocator);
+                result.deinit(self._allocator);
             }
             while (self.pop()) |box| {
-                try result.append(allocator, box);
+                try result.append(self._allocator, box);
             }
             return result;
         }
@@ -205,7 +205,7 @@ test "BinaryHeap drainSorted" {
     try heap.push(try Box(u64).init(std.testing.allocator, 9));
     try heap.push(try Box(u64).init(std.testing.allocator, 3));
 
-    var sorted = try heap.drainSorted(std.testing.allocator);
+    var sorted = try heap.drainSorted();
     defer {
         for (sorted.items) |box| {
             const dead = box.deinit();

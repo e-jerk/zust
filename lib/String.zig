@@ -5,7 +5,7 @@ const SimdUtils = @import("SimdUtils.zig");
 /// Similar to Rust's `String`.
 pub const String = struct {
     buffer: std.ArrayList(u8),
-    allocator: std.mem.Allocator,
+    _allocator: std.mem.Allocator,
 
     const Self = @This();
 
@@ -13,7 +13,7 @@ pub const String = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .buffer = std.ArrayList(u8).empty,
-            .allocator = allocator,
+            ._allocator = allocator,
         };
     }
 
@@ -31,17 +31,17 @@ pub const String = struct {
 
     /// Free the owned buffer.
     pub fn deinit(self: *Self) void {
-        self.buffer.deinit(self.allocator);
+        self.buffer.deinit(self._allocator);
     }
 
     /// Append a byte slice to the end of the string.
     pub fn append(self: *Self, data: []const u8) !void {
-        try self.buffer.appendSlice(self.allocator, data);
+        try self.buffer.appendSlice(self._allocator, data);
     }
 
     /// Append a single byte to the end of the string.
     pub fn appendChar(self: *Self, char: u8) !void {
-        try self.buffer.append(self.allocator, char);
+        try self.buffer.append(self._allocator, char);
     }
 
     /// Return the byte length of the string.
@@ -64,9 +64,9 @@ pub const String = struct {
         self.buffer.clearRetainingCapacity();
     }
 
-    /// Create a deep copy of this string using the given allocator.
-    pub fn clone(self: *const Self, allocator: std.mem.Allocator) !Self {
-        return try initFromSlice(allocator, self.slice());
+    /// Create a deep copy of this string using the same allocator.
+    pub fn clone(self: *const Self) !Self {
+        return try initFromSlice(self._allocator, self.slice());
     }
 
     /// Return true if the string starts with the given prefix.
@@ -104,12 +104,12 @@ pub const String = struct {
 
     /// Return a new string with leading chars from the set removed.
     pub fn trimLeft(self: *const Self, chars: []const u8) Self {
-        return initFromSlice(self.allocator, SimdUtils.trimLeft(self.slice(), chars)) catch unreachable;
+        return initFromSlice(self._allocator, SimdUtils.trimLeft(self.slice(), chars)) catch unreachable;
     }
 
     /// Return a new string with trailing chars from the set removed.
     pub fn trimRight(self: *const Self, chars: []const u8) Self {
-        return initFromSlice(self.allocator, SimdUtils.trimRight(self.slice(), chars)) catch unreachable;
+        return initFromSlice(self._allocator, SimdUtils.trimRight(self.slice(), chars)) catch unreachable;
     }
 
     /// Return true if the string equals another string, case-insensitively (ASCII only).
@@ -122,20 +122,20 @@ pub const String = struct {
         const s = self.slice();
         var i: usize = 0;
         var new_buffer = std.ArrayList(u8).empty;
-        errdefer new_buffer.deinit(self.allocator);
+        errdefer new_buffer.deinit(self._allocator);
 
         while (i < s.len) {
             if (std.mem.indexOf(u8, s[i..], from)) |idx| {
-                try new_buffer.appendSlice(self.allocator, s[i .. i + idx]);
-                try new_buffer.appendSlice(self.allocator, to);
+                try new_buffer.appendSlice(self._allocator, s[i .. i + idx]);
+                try new_buffer.appendSlice(self._allocator, to);
                 i += idx + from.len;
             } else {
-                try new_buffer.appendSlice(self.allocator, s[i..]);
+                try new_buffer.appendSlice(self._allocator, s[i..]);
                 break;
             }
         }
 
-        self.buffer.deinit(self.allocator);
+        self.buffer.deinit(self._allocator);
         self.buffer = new_buffer;
     }
 
@@ -144,30 +144,30 @@ pub const String = struct {
         const old_len = self.buffer.items.len;
 
         var new_buffer = std.ArrayList(u8).empty;
-        errdefer new_buffer.deinit(self.allocator);
+        errdefer new_buffer.deinit(self._allocator);
 
-        try new_buffer.appendSlice(self.allocator, self.buffer.items[0..start]);
-        try new_buffer.appendSlice(self.allocator, replacement);
-        try new_buffer.appendSlice(self.allocator, self.buffer.items[end..old_len]);
+        try new_buffer.appendSlice(self._allocator, self.buffer.items[0..start]);
+        try new_buffer.appendSlice(self._allocator, replacement);
+        try new_buffer.appendSlice(self._allocator, self.buffer.items[end..old_len]);
 
-        self.buffer.deinit(self.allocator);
+        self.buffer.deinit(self._allocator);
         self.buffer = new_buffer;
     }
 
     /// Return a new string with leading and trailing whitespace removed.
     pub fn trim(self: *const Self) Self {
-        return initFromSlice(self.allocator, std.mem.trim(u8, self.slice(), &std.ascii.whitespace)) catch unreachable;
+        return initFromSlice(self._allocator, std.mem.trim(u8, self.slice(), &std.ascii.whitespace)) catch unreachable;
     }
 
     /// Return a new string with leading whitespace removed.
     /// Return a new string with leading whitespace removed.
     pub fn trimStart(self: *const Self) Self {
-        return initFromSlice(self.allocator, std.mem.trimStart(u8, self.slice(), &std.ascii.whitespace)) catch unreachable;
+        return initFromSlice(self._allocator, std.mem.trimStart(u8, self.slice(), &std.ascii.whitespace)) catch unreachable;
     }
 
     /// Return a new string with trailing whitespace removed.
     pub fn trimEnd(self: *const Self) Self {
-        return initFromSlice(self.allocator, std.mem.trimEnd(u8, self.slice(), &std.ascii.whitespace)) catch unreachable;
+        return initFromSlice(self._allocator, std.mem.trimEnd(u8, self.slice(), &std.ascii.whitespace)) catch unreachable;
     }
 
     pub const SplitIter = struct {
@@ -205,8 +205,8 @@ pub const String = struct {
 
     /// Append a formatted string to the end.
     pub fn appendFmt(self: *Self, comptime fmt: []const u8, args: anytype) !void {
-        const formatted = try std.fmt.allocPrint(self.allocator, fmt, args);
-        defer self.allocator.free(formatted);
+        const formatted = try std.fmt.allocPrint(self._allocator, fmt, args);
+        defer self._allocator.free(formatted);
         try self.append(formatted);
     }
 
@@ -325,7 +325,7 @@ test "String clone" {
     var s = try String.initFromSlice(std.testing.allocator, "hello");
     defer s.deinit();
 
-    var copy = try s.clone(std.testing.allocator);
+    var copy = try s.clone();
     defer copy.deinit();
 
     try std.testing.expectEqualStrings(copy.slice(), "hello");

@@ -295,10 +295,10 @@ fn benchRawPool(allocator: std.mem.Allocator) !void {
 
 fn benchStack(allocator: std.mem.Allocator) !void {
     var stack = safe.Stack(i32).init(allocator);
-    defer stack.deinit(allocator);
+    defer stack.deinit();
     var acc: u64 = 0;
     for (0..1_000_000) |i| {
-        try stack.push(allocator, @intCast(i));
+        try stack.push( @intCast(i));
     }
     for (0..1_000_000) |i| {
         if (stack.pop()) |v| {
@@ -330,10 +330,10 @@ fn benchVecDequeStack(allocator: std.mem.Allocator) !void {
 
 fn benchQueue(allocator: std.mem.Allocator) !void {
     var queue = safe.Queue(i32).init(allocator);
-    defer queue.deinit(allocator);
+    defer queue.deinit();
     var acc: u64 = 0;
     for (0..1_000_000) |i| {
-        try queue.enqueue(allocator, @intCast(i));
+        try queue.enqueue( @intCast(i));
     }
     for (0..1_000_000) |i| {
         if (queue.dequeue()) |v| {
@@ -365,7 +365,7 @@ fn benchVecDequeQueue(allocator: std.mem.Allocator) !void {
 
 fn benchRingBuffer(allocator: std.mem.Allocator) !void {
     var rb = try safe.RingBuffer(u8).init(allocator, 1024 * 1024);
-    defer rb.deinit(allocator);
+    defer rb.deinit();
     var acc: u64 = 0;
     for (0..1_000_000) |i| {
         try rb.write(@intCast(i % 256));

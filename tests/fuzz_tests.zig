@@ -138,7 +138,7 @@ test "fuzz: String operations" {
                 trimmed.deinit();
             },
             3 => { // Clone and compare
-                var cloned = try str.clone(allocator);
+                var cloned = try str.clone();
                 defer cloned.deinit();
                 try std.testing.expectEqualStrings(str.slice(), cloned.slice());
             },

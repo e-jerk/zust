@@ -1768,7 +1768,7 @@ test "String clone" {
     var s = try String.initFromSlice(std.testing.allocator, "hello");
     defer s.deinit();
 
-    var copy = try s.clone(std.testing.allocator);
+    var copy = try s.clone();
     defer copy.deinit();
 
     try std.testing.expectEqualStrings(copy.slice(), "hello");
@@ -1815,7 +1815,8 @@ test "Cow([]const u8) toOwned clones borrowed" {
 
     try std.testing.expect(cow.isBorrowed());
 
-    const owned = try cow.toOwned(std.testing.allocator);
+    cow.setAllocator(std.testing.allocator);
+    const owned = try cow.toOwned();
     // cow is now owned and will clean up in defer;
     // `owned` points to the same allocation, so don't free separately.
     try std.testing.expect(!cow.isBorrowed());
@@ -1847,7 +1848,8 @@ test "Cow(String) borrowed toOwned clones" {
 
     try std.testing.expect(cow.isBorrowed());
 
-    const owned = try cow.toOwned(std.testing.allocator);
+    cow.setAllocator(std.testing.allocator);
+    const owned = try cow.toOwned();
     _ = owned;
 
     try std.testing.expect(!cow.isBorrowed());
@@ -1984,7 +1986,7 @@ test "BinaryHeap drainSorted" {
     try heap.push(try Box(u64).init(std.testing.allocator, 9));
     try heap.push(try Box(u64).init(std.testing.allocator, 3));
 
-    var sorted = try heap.drainSorted(std.testing.allocator);
+    var sorted = try heap.drainSorted();
     defer {
         for (sorted.items) |box| {
             const dead = box.deinit();
@@ -2013,7 +2015,7 @@ test "BTreeMap rangeKeys" {
     try map.put(2, try Box(i32).init(std.testing.allocator, 200));
     try map.put(4, try Box(i32).init(std.testing.allocator, 400));
 
-    var keys = try map.rangeKeys(2, 4, std.testing.allocator);
+    var keys = try map.rangeKeys(2, 4);
     defer keys.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 3), keys.items.len);

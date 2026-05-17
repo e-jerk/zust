@@ -5,14 +5,14 @@ const std = @import("std");
 /// Pattern: Similar to Rust's HashSet<T>.
 pub const HashSet = struct {
     map: std.AutoHashMap(u64, void),
-    allocator: std.mem.Allocator,
+    _allocator: std.mem.Allocator,
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .map = std.AutoHashMap(u64, void).init(allocator),
-            .allocator = allocator,
+            ._allocator = allocator,
         };
     }
 
@@ -40,8 +40,8 @@ pub const HashSet = struct {
         return self.map.count() == 0;
     }
 
-    pub fn unionWith(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !Self {
-        var result = Self.init(allocator);
+    pub fn unionWith(self: *const Self, other: *const Self) !Self {
+        var result = Self.init(self._allocator);
         errdefer result.deinit();
 
         var it = self.map.keyIterator();
@@ -57,8 +57,8 @@ pub const HashSet = struct {
         return result;
     }
 
-    pub fn intersection(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !Self {
-        var result = Self.init(allocator);
+    pub fn intersection(self: *const Self, other: *const Self) !Self {
+        var result = Self.init(self._allocator);
         errdefer result.deinit();
 
         var it = self.map.keyIterator();
@@ -120,14 +120,14 @@ test "HashSet union and intersection" {
     try b.insert(2);
     try b.insert(3);
 
-    var u = try a.unionWith(&b, std.testing.allocator);
+    var u = try a.unionWith(&b);
     defer u.deinit();
     try std.testing.expectEqual(@as(usize, 3), u.len());
     try std.testing.expect(u.contains(1));
     try std.testing.expect(u.contains(2));
     try std.testing.expect(u.contains(3));
 
-    var i = try a.intersection(&b, std.testing.allocator);
+    var i = try a.intersection(&b);
     defer i.deinit();
     try std.testing.expectEqual(@as(usize, 1), i.len());
     try std.testing.expect(i.contains(2));

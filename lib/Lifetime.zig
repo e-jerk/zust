@@ -73,34 +73,36 @@ pub fn StackRef(comptime T: type) type {
 /// Usage:
 /// ```zig
 /// const scope = enterScope();
-/// var guard = ScopeGuard(u32).init(scope);
-/// defer guard.deinit(std.testing.allocator);
+/// var guard = ScopeGuard(u32).init(scope, std.testing.allocator);
+/// defer guard.deinit();
 /// var ref = StackRef(u32).init(scope, &x);
-/// try guard.track(std.testing.allocator, &ref);
+/// try guard.track(&ref);
 /// ```
 pub fn ScopeGuard(comptime T: type) type {
     return struct {
         refs: std.ArrayList(*StackRef(T)),
         scope_id: ScopeId,
+        _allocator: std.mem.Allocator,
 
         const Self = @This();
 
-        pub fn init(scope_id: ScopeId) Self {
+        pub fn init(scope_id: ScopeId, allocator: std.mem.Allocator) Self {
             return .{
                 .refs = .empty,
                 .scope_id = scope_id,
+                .allocator = allocator,
             };
         }
 
-        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *Self) void {
             for (self.refs.items) |ref| {
                 ref.invalidate();
             }
-            self.refs.deinit(allocator);
+            self.refs.deinit(self._allocator);
         }
 
-        pub fn track(self: *Self, allocator: std.mem.Allocator, ref: *StackRef(T)) !void {
-            try self.refs.append(allocator, ref);
+        pub fn track(self: *Self, ref: *StackRef(T)) !void {
+            try self.refs.append(self._allocator, ref);
         }
     };
 }
@@ -157,11 +159,11 @@ test "ScopeGuard invalidates refs on deinit" {
     const scope = enterScope();
     var x: u32 = 42;
 
-    var guard = ScopeGuard(u32).init(scope);
-    defer guard.deinit(std.testing.allocator);
+    var guard = ScopeGuard(u32).init(scope, std.testing.allocator);
+    defer guard.deinit();
 
     var ref = StackRef(u32).init(scope, &x);
-    try guard.track(std.testing.allocator, &ref);
+    try guard.track(&ref);
 
     try std.testing.expectEqual(ref.get().*, 42);
     try std.testing.expect(ref.isValid());
@@ -171,15 +173,15 @@ test "ScopeGuard explicit deinit invalidates refs" {
     const scope = enterScope();
     var x: u32 = 42;
 
-    var guard = ScopeGuard(u32).init(scope);
+    var guard = ScopeGuard(u32).init(scope, std.testing.allocator);
     var ref = StackRef(u32).init(scope, &x);
-    try guard.track(std.testing.allocator, &ref);
+    try guard.track(&ref);
 
     try std.testing.expectEqual(ref.get().*, 42);
     try std.testing.expect(ref.isValid());
 
     // Simulate scope exit by deiniting the guard explicitly
-    guard.deinit(std.testing.allocator);
+    guard.deinit();
 
     try std.testing.expect(!ref.isValid());
 }

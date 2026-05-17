@@ -5,20 +5,23 @@ const std = @import("std");
 pub fn Stack(comptime T: type) type {
     return struct {
         items: std.ArrayList(T),
+        _allocator: std.mem.Allocator,
 
         const Self = @This();
 
-        pub fn init(_allocator: std.mem.Allocator) Self {
-            _ = _allocator;
-            return .{ .items = std.ArrayList(T).empty };
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{
+                .items = std.ArrayList(T).empty,
+                ._allocator = allocator,
+            };
         }
 
-        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            self.items.deinit(allocator);
+        pub fn deinit(self: *Self) void {
+            self.items.deinit(self._allocator);
         }
 
-        pub fn push(self: *Self, allocator: std.mem.Allocator, value: T) !void {
-            try self.items.append(allocator, value);
+        pub fn push(self: *Self, value: T) !void {
+            try self.items.append(self._allocator, value);
         }
 
         pub fn pop(self: *Self) ?T {
@@ -38,12 +41,12 @@ pub fn Stack(comptime T: type) type {
             return self.items.items.len == 0;
         }
 
-        pub fn clear(self: *Self, allocator: std.mem.Allocator) void {
-            self.items.clearAndFree(allocator);
+        pub fn clear(self: *Self) void {
+            self.items.clearAndFree(self._allocator);
         }
 
-        pub fn shrinkToFit(self: *Self, allocator: std.mem.Allocator) !void {
-            try self.items.ensureTotalCapacityPrecise(allocator, self.items.items.len);
+        pub fn shrinkToFit(self: *Self) !void {
+            try self.items.ensureTotalCapacityPrecise(self._allocator, self.items.items.len);
         }
     };
 }
@@ -54,20 +57,24 @@ pub fn Queue(comptime T: type) type {
     return struct {
         items: std.ArrayList(T),
         head: usize,
+        _allocator: std.mem.Allocator,
 
         const Self = @This();
 
-        pub fn init(_allocator: std.mem.Allocator) Self {
-            _ = _allocator;
-            return .{ .items = std.ArrayList(T).empty, .head = 0 };
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{
+                .items = std.ArrayList(T).empty,
+                .head = 0,
+                ._allocator = allocator,
+            };
         }
 
-        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            self.items.deinit(allocator);
+        pub fn deinit(self: *Self) void {
+            self.items.deinit(self._allocator);
         }
 
-        pub fn enqueue(self: *Self, allocator: std.mem.Allocator, value: T) !void {
-            try self.items.append(allocator, value);
+        pub fn enqueue(self: *Self, value: T) !void {
+            try self.items.append(self._allocator, value);
         }
 
         pub fn dequeue(self: *Self) ?T {
@@ -97,19 +104,19 @@ pub fn Queue(comptime T: type) type {
             return self.head >= self.items.items.len;
         }
 
-        pub fn clear(self: *Self, allocator: std.mem.Allocator) void {
-            self.items.clearAndFree(allocator);
+        pub fn clear(self: *Self) void {
+            self.items.clearAndFree(self._allocator);
             self.head = 0;
         }
 
         /// Compact the queue by moving elements to the front
-        pub fn compact(self: *Self, allocator: std.mem.Allocator) !void {
+        pub fn compact(self: *Self) !void {
             if (self.head == 0) return;
             const count = self.items.items.len - self.head;
             std.mem.copyForwards(T, self.items.items[0..count], self.items.items[self.head..]);
             self.items.items.len = count;
             self.head = 0;
-            try self.items.ensureTotalCapacityPrecise(allocator, count);
+            try self.items.ensureTotalCapacityPrecise(self._allocator, count);
         }
     };
 }
@@ -118,11 +125,11 @@ pub fn Queue(comptime T: type) type {
 
 test "Stack push and pop" {
     var stack = Stack(u32).init(std.testing.allocator);
-    defer stack.deinit(std.testing.allocator);
+    defer stack.deinit();
 
-    try stack.push(std.testing.allocator, 10);
-    try stack.push(std.testing.allocator, 20);
-    try stack.push(std.testing.allocator, 30);
+    try stack.push(10);
+    try stack.push(20);
+    try stack.push(30);
 
     try std.testing.expectEqual(stack.pop(), 30);
     try std.testing.expectEqual(stack.pop(), 20);
@@ -132,12 +139,12 @@ test "Stack push and pop" {
 
 test "Stack peek" {
     var stack = Stack(u32).init(std.testing.allocator);
-    defer stack.deinit(std.testing.allocator);
+    defer stack.deinit();
 
-    try stack.push(std.testing.allocator, 42);
+    try stack.push(42);
     try std.testing.expectEqual(stack.peek().?.*, 42);
 
-    try stack.push(std.testing.allocator, 100);
+    try stack.push(100);
     try std.testing.expectEqual(stack.peek().?.*, 100);
 
     _ = stack.pop();
@@ -146,15 +153,15 @@ test "Stack peek" {
 
 test "Stack clear and isEmpty" {
     var stack = Stack(u32).init(std.testing.allocator);
-    defer stack.deinit(std.testing.allocator);
+    defer stack.deinit();
 
     try std.testing.expect(stack.isEmpty());
-    try stack.push(std.testing.allocator, 1);
-    try stack.push(std.testing.allocator, 2);
+    try stack.push(1);
+    try stack.push(2);
     try std.testing.expect(!stack.isEmpty());
     try std.testing.expectEqual(stack.len(), 2);
 
-    stack.clear(std.testing.allocator);
+    stack.clear();
     try std.testing.expect(stack.isEmpty());
     try std.testing.expectEqual(stack.len(), 0);
     try std.testing.expectEqual(stack.pop(), null);
@@ -162,11 +169,11 @@ test "Stack clear and isEmpty" {
 
 test "Queue enqueue and dequeue" {
     var queue = Queue(u32).init(std.testing.allocator);
-    defer queue.deinit(std.testing.allocator);
+    defer queue.deinit();
 
-    try queue.enqueue(std.testing.allocator, 10);
-    try queue.enqueue(std.testing.allocator, 20);
-    try queue.enqueue(std.testing.allocator, 30);
+    try queue.enqueue(10);
+    try queue.enqueue(20);
+    try queue.enqueue(30);
 
     try std.testing.expectEqual(queue.dequeue(), 10);
     try std.testing.expectEqual(queue.dequeue(), 20);
@@ -176,12 +183,12 @@ test "Queue enqueue and dequeue" {
 
 test "Queue FIFO order" {
     var queue = Queue(u32).init(std.testing.allocator);
-    defer queue.deinit(std.testing.allocator);
+    defer queue.deinit();
 
-    try queue.enqueue(std.testing.allocator, 1);
-    try queue.enqueue(std.testing.allocator, 2);
-    try queue.enqueue(std.testing.allocator, 3);
-    try queue.enqueue(std.testing.allocator, 4);
+    try queue.enqueue(1);
+    try queue.enqueue(2);
+    try queue.enqueue(3);
+    try queue.enqueue(4);
 
     try std.testing.expectEqual(queue.dequeue(), 1);
     try std.testing.expectEqual(queue.dequeue(), 2);
@@ -192,11 +199,11 @@ test "Queue FIFO order" {
 
 test "Queue compact" {
     var queue = Queue(u32).init(std.testing.allocator);
-    defer queue.deinit(std.testing.allocator);
+    defer queue.deinit();
 
-    try queue.enqueue(std.testing.allocator, 10);
-    try queue.enqueue(std.testing.allocator, 20);
-    try queue.enqueue(std.testing.allocator, 30);
+    try queue.enqueue(10);
+    try queue.enqueue(20);
+    try queue.enqueue(30);
 
     // Dequeue some to advance head
     try std.testing.expectEqual(queue.dequeue(), 10);
@@ -205,7 +212,7 @@ test "Queue compact" {
     try std.testing.expectEqual(queue.head, 2);
 
     // Compact moves remaining elements to front
-    try queue.compact(std.testing.allocator);
+    try queue.compact();
     try std.testing.expectEqual(queue.head, 0);
     try std.testing.expectEqual(queue.len(), 1);
     try std.testing.expectEqual(queue.peek().?.*, 30);

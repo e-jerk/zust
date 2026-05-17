@@ -6,7 +6,7 @@ const Box = @import("Box.zig").Box;
 /// Not self-balancing; worst case is O(n) for skewed input.
 pub const BTreeSet = struct {
     root: ?Box(Node),
-    allocator: std.mem.Allocator,
+    _allocator: std.mem.Allocator,
     count: usize,
 
     const Node = struct {
@@ -18,7 +18,7 @@ pub const BTreeSet = struct {
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator) Self {
-        return .{ .root = null, .allocator = allocator, .count = 0 };
+        return .{ .root = null, ._allocator = allocator, .count = 0 };
     }
 
     pub fn deinit(self: *Self) void {
@@ -36,7 +36,7 @@ pub const BTreeSet = struct {
     }
 
     pub fn insert(self: *Self, key: u64) !void {
-        self.root = try insertNode(self.allocator, self.root, key, &self.count);
+        self.root = try insertNode(self._allocator, self.root, key, &self.count);
     }
 
     fn insertNode(allocator: std.mem.Allocator, maybe_node: ?Box(Node), key: u64, count: *usize) !?Box(Node) {
@@ -74,7 +74,7 @@ pub const BTreeSet = struct {
     }
 
     pub fn remove(self: *Self, key: u64) void {
-        self.root = removeNode(self.allocator, self.root, key, &self.count);
+        self.root = removeNode(self._allocator, self.root, key, &self.count);
     }
 
     fn removeNode(allocator: std.mem.Allocator, maybe_node: ?Box(Node), key: u64, count: *usize) ?Box(Node) {
@@ -141,13 +141,13 @@ pub const BTreeSet = struct {
     }
 
     /// Collect all keys into a newly allocated slice (sorted order).
-    pub fn keys(self: *const Self, allocator: std.mem.Allocator) ![]u64 {
+    pub fn keys(self: *const Self) ![]u64 {
         var result = std.ArrayList(u64).empty;
-        errdefer result.deinit(allocator);
+        errdefer result.deinit(self._allocator);
         if (self.root) |r| {
-            try collectKeys(r, &result, allocator);
+            try collectKeys(r, &result, self._allocator);
         }
-        return result.toOwnedSlice(allocator);
+        return result.toOwnedSlice(self._allocator);
     }
 
     fn collectKeys(node_box: Box(Node), list: *std.ArrayList(u64), allocator: std.mem.Allocator) !void {
@@ -217,7 +217,7 @@ test "BTreeSet sorted keys" {
     try set.insert(1);
     try set.insert(2);
 
-    const k = try set.keys(allocator);
+    const k = try set.keys();
     defer allocator.free(k);
 
     try std.testing.expectEqualSlices(u64, &[_]u64{ 1, 2, 3 }, k);
