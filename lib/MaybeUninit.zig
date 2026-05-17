@@ -67,8 +67,8 @@ test "MaybeUninit write and read" {
 
 test "MaybeUninit with heap value" {
     const allocator = std.testing.allocator;
-    var mu = Type(Box(i32, 0, 0, 0)).init();
-    const box = try Box(i32, 0, 0, 0).init(allocator, 100);
+    var mu = Type(Box(i32)).init();
+    const box = try Box(i32).init(allocator, 100);
     mu.write(box);
 
     try std.testing.expectEqual(@as(i32, 100), mu.assumeInit().ptr.*);

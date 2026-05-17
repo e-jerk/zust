@@ -320,7 +320,7 @@ pub const Analyzer = struct {
         const source_z = try self.gpa.dupeZ(u8, source);
         defer self.gpa.free(source_z);
 
-        var ast_box = try Box(std.zig.Ast, 0, 0, 0).init(self.gpa, undefined);
+        var ast_box = try Box(std.zig.Ast).init(self.gpa, undefined);
         ast_box.ptr.* = try std.zig.Ast.parse(self.gpa, source_z, .zig);
         defer {
             ast_box.ptr.deinit(self.gpa);
@@ -385,7 +385,7 @@ pub const Analyzer = struct {
         const source_z = try self.gpa.dupeZ(u8, source);
         defer self.gpa.free(source_z);
 
-        var ast_box = try Box(std.zig.Ast, 0, 0, 0).init(self.gpa, undefined);
+        var ast_box = try Box(std.zig.Ast).init(self.gpa, undefined);
         ast_box.ptr.* = try std.zig.Ast.parse(self.gpa, source_z, .zig);
         // Ensure Ast is deinit'd exactly once via Box ownership
         defer {
@@ -432,7 +432,7 @@ pub const Analyzer = struct {
                     if (is_raw) {
                         has_raw_params = true;
                         const param_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(type_expr)]);
-                        try self.addDiagnostic(file_path, .UseAfterFree, "function parameter uses raw pointer/slice type; consider using safe.Box(T, 0, 0, 0)", @intCast(param_loc.line), @intCast(param_loc.column));
+                        try self.addDiagnostic(file_path, .UseAfterFree, "function parameter uses raw pointer/slice type; consider using safe.Box(T)", @intCast(param_loc.line), @intCast(param_loc.column));
                     }
                 } else {
                     param_raw_flags[param_idx] = false;
@@ -491,7 +491,7 @@ pub const Analyzer = struct {
 
             // Emit return type warning (after contract check so we can skip if contract says owned)
             if (returns_raw and return_ownership != .owned) {
-                try self.addDiagnostic(file_path, .UseAfterFree, "function returns raw pointer/slice; consider returning safe.Box(T, 0, 0, 0) instead", @intCast(token_loc.line), @intCast(token_loc.column));
+                try self.addDiagnostic(file_path, .UseAfterFree, "function returns raw pointer/slice; consider returning safe.Box(T) instead", @intCast(token_loc.line), @intCast(token_loc.column));
             }
 
             // Store in registry (only if it has a real name)
@@ -539,7 +539,7 @@ pub const Analyzer = struct {
                         }
                     }
                     if (!skip_warning) {
-                        try self.addDiagnostic(file_path, .UseAfterFree, "function returns raw pointer/slice; consider returning safe.Box(T, 0, 0, 0) instead", @intCast(token_loc.line), @intCast(token_loc.column));
+                        try self.addDiagnostic(file_path, .UseAfterFree, "function returns raw pointer/slice; consider returning safe.Box(T) instead", @intCast(token_loc.line), @intCast(token_loc.column));
                     }
                 }
             }
@@ -549,7 +549,7 @@ pub const Analyzer = struct {
                 if (param.type_expr) |type_expr| {
                     if (isRawPointerType(ast, type_expr) or isSliceType(ast, type_expr)) {
                         const param_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(type_expr)]);
-                        try self.addDiagnostic(file_path, .UseAfterFree, "function parameter uses raw pointer/slice type; consider using safe.Box(T, 0, 0, 0)", @intCast(param_loc.line), @intCast(param_loc.column));
+                        try self.addDiagnostic(file_path, .UseAfterFree, "function parameter uses raw pointer/slice type; consider using safe.Box(T)", @intCast(param_loc.line), @intCast(param_loc.column));
                     }
                 }
             }
@@ -761,7 +761,7 @@ pub const Analyzer = struct {
         if (ast.fullVarDecl(node)) |var_decl| {
             if (var_decl.ast.type_node.unwrap()) |type_node| {
                 if (isRawPointerType(ast, type_node) or isSliceType(ast, type_node)) {
-                    try self.addDiagnostic(file_path, .UseAfterFree, "raw pointer/slice type in variable declaration; consider using safe.Box(T, 0, 0, 0) instead", @intCast(token_loc.line), @intCast(token_loc.column));
+                    try self.addDiagnostic(file_path, .UseAfterFree, "raw pointer/slice type in variable declaration; consider using safe.Box(T) instead", @intCast(token_loc.line), @intCast(token_loc.column));
                 }
             }
         }
@@ -787,7 +787,7 @@ pub const Analyzer = struct {
                 if (call_name.len > 0) {
                     if (self.functions.get(call_name)) |fn_info| {
                         if (fn_info.returns_raw_pointer) {
-                            try self.addDiagnostic(file_path, .UseAfterFree, "variable initialized with raw pointer from function call; consider using safe.Box(T, 0, 0, 0) to take ownership", @intCast(token_loc.line), @intCast(token_loc.column));
+                            try self.addDiagnostic(file_path, .UseAfterFree, "variable initialized with raw pointer from function call; consider using safe.Box(T) to take ownership", @intCast(token_loc.line), @intCast(token_loc.column));
                         }
                     }
                 }
@@ -1308,9 +1308,9 @@ pub const Analyzer = struct {
             .start_col = 0,
             .end_line = @intCast(token_loc.line),
             .end_col = 999,
-            .new_text = "safe.Box(T, 0, 0, 0).init(allocator, value)",
+            .new_text = "safe.Box(T).init(allocator, value)",
         };
-        try self.addDiagnosticWithFix(file_path, .UseAfterFree, "raw allocator.create(T) detected; consider using safe.Box(T, 0, 0, 0).init(allocator, value) instead", @intCast(token_loc.line), @intCast(token_loc.column), .{
+        try self.addDiagnosticWithFix(file_path, .UseAfterFree, "raw allocator.create(T) detected; consider using safe.Box(T).init(allocator, value) instead", @intCast(token_loc.line), @intCast(token_loc.column), .{
             .description = "Replace with safe.Box",
             .replacements = replacements,
         });
@@ -1380,7 +1380,7 @@ pub const Analyzer = struct {
             }
         } else {
             // Raw destroy on untracked pointer - suggest using Box
-            try self.addDiagnostic(file_path, .UseAfterFree, "raw allocator.destroy(ptr) detected; consider using safe.Box(T, 0, 0, 0).deinit() instead", @intCast(token_loc.line), @intCast(token_loc.column));
+            try self.addDiagnostic(file_path, .UseAfterFree, "raw allocator.destroy(ptr) detected; consider using safe.Box(T).deinit() instead", @intCast(token_loc.line), @intCast(token_loc.column));
         }
     }
 
@@ -1487,12 +1487,12 @@ pub const Analyzer = struct {
                         var_state.is_read = true;
                         if (!var_state.is_box and var_state.is_live) {
                             const token_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(node)]);
-                            try self.addDiagnostic(file_path, .UseAfterFree, "raw pointer dereference; consider using safe.Box(T, 0, 0, 0).withImm() or .withMut() instead", @intCast(token_loc.line), @intCast(token_loc.column));
+                            try self.addDiagnostic(file_path, .UseAfterFree, "raw pointer dereference; consider using safe.Box(T).withImm() or .withMut() instead", @intCast(token_loc.line), @intCast(token_loc.column));
                         }
                     } else {
                         // Untracked raw pointer dereference
                         const token_loc = ast.tokenLocation(0, ast.nodes.items(.main_token)[@intFromEnum(node)]);
-                        try self.addDiagnostic(file_path, .UseAfterFree, "raw pointer dereference detected; consider using safe.Box(T, 0, 0, 0) for memory safety", @intCast(token_loc.line), @intCast(token_loc.column));
+                        try self.addDiagnostic(file_path, .UseAfterFree, "raw pointer dereference detected; consider using safe.Box(T) for memory safety", @intCast(token_loc.line), @intCast(token_loc.column));
                     }
                 }
             },

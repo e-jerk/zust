@@ -333,7 +333,7 @@ test "analyzer detects double free in source" {
 
     const source =
         \\fn testDoubleFree() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    const dead = box.deinit();
         \\    const dead2 = dead.deinit();
         \\    _ = dead2;
@@ -355,7 +355,7 @@ test "analyzer detects use after free in source" {
 
     const source =
         \\fn testUseAfterFree() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    const raw = box.unsafePtr();
         \\    const dead = box.deinit();
         \\    _ = dead;
@@ -453,7 +453,7 @@ test "LSP server publish diagnostics on didOpen" {
     defer server.deinit();
 
     const source =
-        "fn testDoubleFree() void { const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable; const dead = box.deinit(); const dead2 = dead.deinit(); _ = dead2; }";
+        "fn testDoubleFree() void { const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable; const dead = box.deinit(); const dead2 = dead.deinit(); _ = dead2; }";
 
     const body = "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file:///test.zig\",\"version\":1,\"text\":\"" ++ source ++ "\"}}}";
     var did_open_str = String.init(gpa);
@@ -510,7 +510,7 @@ test "LSP incremental sync applies range changes and republishes diagnostics" {
     try std.testing.expect(std.mem.indexOf(u8, open_response, "textDocument/publishDiagnostics") != null);
 
     // Now send an incremental change that introduces a Box leak
-    const change_text = "const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable";
+    const change_text = "const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable";
     const change_body = "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"file:///test.zig\",\"version\":2},\"contentChanges\":[{\"range\":{\"start\":{\"line\":0,\"character\":17},\"end\":{\"line\":0,\"character\":23}},\"text\":\"" ++ change_text ++ "\"}]}}";
     var change_str = String.init(gpa);
     defer change_str.deinit();
@@ -569,7 +569,7 @@ test "analyzer detects cross-function pointer escape" {
         \\}
         \\
         \\fn caller() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    const raw = box.unsafePtr();
         \\    takesRawPtr(raw);
         \\    const dead = box.deinit();
@@ -640,7 +640,7 @@ test "analyzer detects interprocedural use-after-free" {
         \\}
         \\
         \\fn caller() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    const raw = box.unsafePtr();
         \\    const dead = box.deinit();
         \\    _ = dead;
@@ -677,7 +677,7 @@ test "analyzer respects @safe(nocapture) annotation" {
         \\}
         \\
         \\fn caller() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    const raw = box.unsafePtr();
         \\    takesRawPtr(raw);
         \\    // Intentionally not deinit-ing box here; the test focus is the call-site check
@@ -732,7 +732,7 @@ test "analyzer workspace detects cross-file use-after-free" {
         \\const Box = @import("safe").Box;
         \\
         \\fn caller() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    const raw = box.unsafePtr();
         \\    const dead = box.deinit();
         \\    _ = dead;
@@ -776,7 +776,7 @@ test "analyzer workspace respects cross-file nocapture annotation" {
         \\const Box = @import("safe").Box;
         \\
         \\fn caller() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    const raw = box.unsafePtr();
         \\    safeFn(raw);
         \\}
@@ -810,7 +810,7 @@ test "analyzer warns on pointer escape without nocapture annotation" {
         \\}
         \\
         \\fn caller() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    const raw = box.unsafePtr();
         \\    takesRawPtr(raw);
         \\    const dead = box.deinit();
@@ -837,7 +837,7 @@ test "analyzer detects @safe(returns: owned) annotation" {
     const source =
         \\/// @safe(returns: *u32 as owned)
         \\fn createPtr() *u32 {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    return box.unsafePtr();
         \\}
         \\
@@ -865,13 +865,13 @@ test "analyzer enforces takes: owned contract" {
 
     const source =
         \\/// @safe(takes: box as owned)
-        \\fn consumeBox(box: Box(u32, 0, 0, 0)) void {
+        \\fn consumeBox(box: Box(u32)) void {
         \\    const dead = box.deinit();
         \\    _ = dead;
         \\}
         \\
         \\fn caller() void {
-        \\    const b = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const b = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    consumeBox(b);
         \\    const dead = b.deinit();
         \\    _ = dead;
@@ -1078,7 +1078,7 @@ test "Analyzer detects Mutex not unlocked" {
 test "Analyzer detects memory leak" {
     const source =
         \\fn testLeak() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    _ = box;
         \\}
     ;
@@ -1130,7 +1130,7 @@ test "Analyzer detects uninitialized variable read" {
 test "Analyzer no false positive leak when properly freed" {
     const source =
         \\fn testNoLeak() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    const dead = box.deinit();
         \\    _ = dead;
         \\}
@@ -1160,7 +1160,7 @@ test "Fix generated for missing deinit" {
 
     const source =
         \\fn testLeak() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    _ = box;
         \\}
     ;
@@ -1544,7 +1544,7 @@ test "analyzer detects borrow across nosuspend boundary" {
         \\fn asyncFn(x: *const u32) callconv(.Async) void { _ = x; }
         \\
         \\fn caller() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    const b = box.borrowImm();
         \\    nosuspend asyncFn(b);
         \\}
@@ -1566,13 +1566,13 @@ test "analyzer detects use-after-move passing to async function" {
     defer analyzer.deinit();
 
     const source =
-        \\fn asyncFn(x: Box(u32, 0, 0, 0)) callconv(.Async) void {
+        \\fn asyncFn(x: Box(u32)) callconv(.Async) void {
         \\    const dead = x.deinit();
         \\    _ = dead;
         \\}
         \\
         \\fn caller() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    asyncFn(box);
         \\    const dead = box.deinit();
         \\    _ = dead;
@@ -1645,7 +1645,7 @@ test "cache analysis reuses results for unchanged content" {
 
     const source =
         \\fn testDoubleFree() void {
-        \\    const box = Box(u32, 0, 0, 0).init(std.heap.page_allocator, 42) catch unreachable;
+        \\    const box = Box(u32).init(std.heap.page_allocator, 42) catch unreachable;
         \\    const dead = box.deinit();
         \\    const dead2 = dead.deinit();
         \\    _ = dead2;

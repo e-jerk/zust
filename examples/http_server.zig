@@ -104,7 +104,7 @@ const Server = struct {
     connection_counter: safe.Mutex(u64),
 
     // safe.Box: owned shutdown flag. Only one owner; deinit frees it.
-    shutdown_flag: safe.Box(bool, 0, 0, 0),
+    shutdown_flag: safe.Box(bool),
 
     const Handler = *const fn (*Request, *Response) void;
 
@@ -113,7 +113,7 @@ const Server = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, port: u16) !Server {
-        const shutdown_box = try safe.Box(bool, 0, 0, 0).init(allocator, false);
+        const shutdown_box = try safe.Box(bool).init(allocator, false);
         return .{
             .allocator = allocator,
             .port = port,
@@ -142,7 +142,7 @@ const Server = struct {
     /// safe.Box transfers ownership of the RouteEntry into the HashMap.
     pub fn route(self: *Server, path: []const u8, handler: Handler) !void {
         const entry = RouteEntry{ .handler = handler };
-        const box = try safe.Box(RouteEntry, 0, 0, 0).init(self.allocator, entry);
+        const box = try safe.Box(RouteEntry).init(self.allocator, entry);
         try self.route_table.put(path, box);
     }
 
@@ -291,7 +291,7 @@ fn parseRequest(buffer: []u8, req: *Request) !void {
                 .value = safe.SmallString(255).initFromSlice(value),
             };
             // safe.Box: transfers ownership of the HeaderValue into the HashMap.
-            const box = try safe.Box(Request.HeaderValue, 0, 0, 0).init(req.headers.allocator, entry);
+            const box = try safe.Box(Request.HeaderValue).init(req.headers.allocator, entry);
             try req.headers.put(name, box);
         }
 

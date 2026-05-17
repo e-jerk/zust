@@ -18,13 +18,13 @@ const Box = @import("Box.zig").Box;
 /// ```
 pub fn AsyncBox(comptime T: type) type {
     return struct {
-        box: ?Box(T, 0, 0, 0),
+        box: ?Box(T),
         allocator: std.mem.Allocator,
 
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator, value: T) !Self {
-            const b = try Box(T, 0, 0, 0).init(allocator, value);
+            const b = try Box(T).init(allocator, value);
             return .{
                 .box = b,
                 .allocator = allocator,
@@ -42,7 +42,7 @@ pub fn AsyncBox(comptime T: type) type {
 
         /// Take ownership out of the AsyncBox.
         /// The caller is now responsible for deinit.
-        pub fn take(self: *Self) ?Box(T, 0, 0, 0) {
+        pub fn take(self: *Self) ?Box(T) {
             const b = self.box;
             self.box = null;
             return b;

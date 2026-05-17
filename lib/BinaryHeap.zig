@@ -1,14 +1,14 @@
 const std = @import("std");
 const Box = @import("Box.zig").Box;
 
-/// A max-heap priority queue that owns Box(T, 0, 0, 0) values.
+/// A max-heap priority queue that owns Box(T) values.
 /// Heap property: parent >= children.
 /// The caller provides a `compare` function that returns true when the first
 /// argument has higher priority than the second (i.e. should be closer to the root).
 /// Pattern: Similar to Rust's BinaryHeap<T>.
 pub fn BinaryHeap(comptime T: type) type {
     return struct {
-        items: std.ArrayList(Box(T, 0, 0, 0)),
+        items: std.ArrayList(Box(T)),
         allocator: std.mem.Allocator,
         compare: *const fn (*const T, *const T) bool,
 
@@ -16,7 +16,7 @@ pub fn BinaryHeap(comptime T: type) type {
 
         pub fn init(allocator: std.mem.Allocator, compare: *const fn (*const T, *const T) bool) Self {
             return .{
-                .items = std.ArrayList(Box(T, 0, 0, 0)).empty,
+                .items = std.ArrayList(Box(T)).empty,
                 .allocator = allocator,
                 .compare = compare,
             };
@@ -30,12 +30,12 @@ pub fn BinaryHeap(comptime T: type) type {
             self.items.deinit(self.allocator);
         }
 
-        pub fn push(self: *Self, box: Box(T, 0, 0, 0)) !void {
+        pub fn push(self: *Self, box: Box(T)) !void {
             try self.items.append(self.allocator, box);
             siftUp(self, self.items.items.len - 1);
         }
 
-        pub fn pop(self: *Self) ?Box(T, 0, 0, 0) {
+        pub fn pop(self: *Self) ?Box(T) {
             const n = self.items.items.len;
             if (n == 0) return null;
             if (n == 1) {
@@ -66,8 +66,8 @@ pub fn BinaryHeap(comptime T: type) type {
             return self.items.items[0].unsafePtr();
         }
 
-        pub fn drainSorted(self: *Self, allocator: std.mem.Allocator) !std.ArrayList(Box(T, 0, 0, 0)) {
-            var result: std.ArrayList(Box(T, 0, 0, 0)) = .empty;
+        pub fn drainSorted(self: *Self, allocator: std.mem.Allocator) !std.ArrayList(Box(T)) {
+            var result: std.ArrayList(Box(T)) = .empty;
             errdefer {
                 for (result.items) |box| {
                     const dead = box.deinit();
@@ -132,9 +132,9 @@ test "BinaryHeap basic operations" {
     try std.testing.expect(heap.isEmpty());
     try std.testing.expectEqual(@as(usize, 0), heap.len());
 
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 10));
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 30));
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 20));
+    try heap.push(try Box(u64).init(std.testing.allocator, 10));
+    try heap.push(try Box(u64).init(std.testing.allocator, 30));
+    try heap.push(try Box(u64).init(std.testing.allocator, 20));
 
     try std.testing.expectEqual(@as(usize, 3), heap.len());
     try std.testing.expect(!heap.isEmpty());
@@ -155,7 +155,7 @@ test "BinaryHeap ordering" {
 
     const values = [_]u64{ 5, 1, 9, 3, 7 };
     for (values) |v| {
-        try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, v));
+        try heap.push(try Box(u64).init(std.testing.allocator, v));
     }
 
     var sorted: [5]u64 = undefined;
@@ -182,9 +182,9 @@ test "BinaryHeap peekMut" {
     var heap = BinaryHeap(u64).init(std.testing.allocator, u64Greater);
     defer heap.deinit();
 
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 10));
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 30));
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 20));
+    try heap.push(try Box(u64).init(std.testing.allocator, 10));
+    try heap.push(try Box(u64).init(std.testing.allocator, 30));
+    try heap.push(try Box(u64).init(std.testing.allocator, 20));
 
     const peek = heap.peekMut().?;
     try std.testing.expectEqual(@as(u64, 30), peek.*);
@@ -200,10 +200,10 @@ test "BinaryHeap drainSorted" {
     var heap = BinaryHeap(u64).init(std.testing.allocator, u64Greater);
     defer heap.deinit();
 
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 5));
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 1));
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 9));
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 3));
+    try heap.push(try Box(u64).init(std.testing.allocator, 5));
+    try heap.push(try Box(u64).init(std.testing.allocator, 1));
+    try heap.push(try Box(u64).init(std.testing.allocator, 9));
+    try heap.push(try Box(u64).init(std.testing.allocator, 3));
 
     var sorted = try heap.drainSorted(std.testing.allocator);
     defer {

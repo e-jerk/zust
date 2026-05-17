@@ -79,8 +79,8 @@ test "ManuallyDrop take" {
 
 test "ManuallyDrop with Box" {
     const allocator = std.testing.allocator;
-    const box = try Box(i32, 0, 0, 0).init(allocator, 100);
-    var md = Type(Box(i32, 0, 0, 0)).init(box);
+    const box = try Box(i32).init(allocator, 100);
+    var md = Type(Box(i32)).init(box);
 
     // Access the inner Box.
     try std.testing.expectEqual(@as(i32, 100), md.get().ptr.*);

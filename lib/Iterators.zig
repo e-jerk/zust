@@ -386,7 +386,7 @@ pub fn SliceIter(comptime T: type) type {
 }
 
 /// Consuming iterator over `ArrayList(T)` elements.
-/// Yields `Box(T, 0, 0, 0)` values by popping from the back (LIFO).
+/// Yields `Box(T)` values by popping from the back (LIFO).
 /// The iterator owns the list; do not deinit the original after passing it in.
 pub fn ArrayListIter(comptime T: type) type {
     return struct {
@@ -398,7 +398,7 @@ pub fn ArrayListIter(comptime T: type) type {
             return .{ .list = list };
         }
 
-        pub fn next(self: *Self) ?Box(T, 0, 0, 0) {
+        pub fn next(self: *Self) ?Box(T) {
             return self.list.pop();
         }
 
@@ -413,7 +413,7 @@ pub fn ArrayListIter(comptime T: type) type {
 }
 
 /// Consuming iterator over `VecDeque(T)` elements.
-/// Yields `Box(T, 0, 0, 0)` values by popping from the front (FIFO).
+/// Yields `Box(T)` values by popping from the front (FIFO).
 /// The iterator owns the deque; do not deinit the original after passing it in.
 pub fn VecDequeIter(comptime T: type) type {
     return struct {
@@ -425,7 +425,7 @@ pub fn VecDequeIter(comptime T: type) type {
             return .{ .dq = dq };
         }
 
-        pub fn next(self: *Self) ?Box(T, 0, 0, 0) {
+        pub fn next(self: *Self) ?Box(T) {
             return self.dq.popFront();
         }
 
@@ -1036,9 +1036,9 @@ test "ArrayListIter consumes list" {
     const allocator = arena.allocator();
 
     var list = ArrayList(u32).init(allocator);
-    try list.append(try Box(u32, 0, 0, 0).init(allocator, 10));
-    try list.append(try Box(u32, 0, 0, 0).init(allocator, 20));
-    try list.append(try Box(u32, 0, 0, 0).init(allocator, 30));
+    try list.append(try Box(u32).init(allocator, 10));
+    try list.append(try Box(u32).init(allocator, 20));
+    try list.append(try Box(u32).init(allocator, 30));
 
     var iter = ArrayListIter(u32).init(list);
     try std.testing.expectEqual(iter.len(), 3);
@@ -1086,9 +1086,9 @@ test "VecDequeIter consumes deque" {
     const allocator = arena.allocator();
 
     var dq = try VecDeque(u32).init(allocator);
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(allocator, 10));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(allocator, 20));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(allocator, 30));
+    try dq.pushBack(try Box(u32).init(allocator, 10));
+    try dq.pushBack(try Box(u32).init(allocator, 20));
+    try dq.pushBack(try Box(u32).init(allocator, 30));
 
     var iter = VecDequeIter(u32).init(dq);
     try std.testing.expectEqual(iter.len(), 3);

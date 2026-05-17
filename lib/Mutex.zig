@@ -17,14 +17,14 @@ const Default = @import("Default.zig").Default;
 /// ```
 pub fn Mutex(comptime T: type) type {
     return struct {
-        box: Box(T, 0, 0, 0),
+        box: Box(T),
         inner_mutex: std.atomic.Mutex,
 
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator, value: T) !Self {
             return .{
-                .box = try Box(T, 0, 0, 0).init(allocator, value),
+                .box = try Box(T).init(allocator, value),
                 .inner_mutex = .unlocked,
             };
         }
@@ -121,7 +121,7 @@ pub fn MutexGuard(comptime T: type) type {
 /// Uses a simple mutex-based implementation.
 pub fn RwLock(comptime T: type) type {
     return struct {
-        box: Box(T, 0, 0, 0),
+        box: Box(T),
         inner_mutex: std.atomic.Mutex,
         readers: std.atomic.Value(u32),
         writers_waiting: std.atomic.Value(u32),
@@ -143,7 +143,7 @@ pub fn RwLock(comptime T: type) type {
 
         pub fn init(allocator: std.mem.Allocator, value: T) !Self {
             return .{
-                .box = try Box(T, 0, 0, 0).init(allocator, value),
+                .box = try Box(T).init(allocator, value),
                 .inner_mutex = .unlocked,
                 .readers = std.atomic.Value(u32).init(0),
                 .writers_waiting = std.atomic.Value(u32).init(0),

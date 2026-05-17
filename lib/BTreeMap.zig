@@ -1,12 +1,13 @@
 const std = @import("std");
 const Box = @import("Box.zig").Box;
+const BoxStateful = @import("Box.zig").BoxStateful;
 
 /// A simple binary search tree map (not self-balancing).
 /// Stores key-value pairs where keys are u64 and values are owned Box(T).
 /// For a production-grade ordered map, use a self-balancing tree (e.g. AVL, Red-Black).
 pub fn BTreeMap(comptime T: type) type {
     return struct {
-        root: ?Box(Node, 0, 0, 0),
+        root: ?Box(Node),
         allocator: std.mem.Allocator,
         count: usize,
         outstanding_imm: u32 = 0,
@@ -16,9 +17,9 @@ pub fn BTreeMap(comptime T: type) type {
 
         const Node = struct {
             key: u64,
-            value: Box(T, 0, 0, 0),
-            left: ?Box(Node, 0, 0, 0),
-            right: ?Box(Node, 0, 0, 0),
+            value: Box(T),
+            left: ?Box(Node),
+            right: ?Box(Node),
         };
 
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -41,7 +42,7 @@ pub fn BTreeMap(comptime T: type) type {
             }
         }
 
-        fn deinitNode(box: Box(Node, 0, 0, 0)) void {
+        fn deinitNode(box: Box(Node)) void {
             const node = box.unsafePtr();
             const left = node.left;
             const right = node.right;
@@ -54,19 +55,19 @@ pub fn BTreeMap(comptime T: type) type {
             _ = dead_val;
         }
 
-        pub fn put(self: *Self, key: u64, value_box: Box(T, 0, 0, 0)) !void {
+        pub fn put(self: *Self, key: u64, value_box: Box(T)) !void {
             if (self.outstanding_mut > 0) {
                 @panic("cannot put while BTreeMap is mutably borrowed");
             }
             self.root = try insertNode(self.allocator, self.root, key, value_box, &self.count);
         }
 
-        fn insertNode(allocator: std.mem.Allocator, maybe_box: ?Box(Node, 0, 0, 0), key: u64, value: Box(T, 0, 0, 0), count: *usize) !?Box(Node, 0, 0, 0) {
+        fn insertNode(allocator: std.mem.Allocator, maybe_box: ?Box(Node), key: u64, value: Box(T), count: *usize) !?Box(Node) {
             const box = maybe_box orelse {
                 const node_ptr = try allocator.create(Node);
                 node_ptr.* = Node{ .key = key, .value = value, .left = null, .right = null };
                 count.* += 1;
-                return Box(Node, 0, 0, 0){ .ptr = node_ptr, .allocator = allocator };
+                return Box(Node){ .ptr = node_ptr, .allocator = allocator };
             };
             const node = box.unsafePtr();
             if (key == node.key) {
@@ -83,7 +84,7 @@ pub fn BTreeMap(comptime T: type) type {
             }
         }
 
-        pub fn get(self: *Self, key: u64) ?Box(T, 0, 0, 0) {
+        pub fn get(self: *Self, key: u64) ?Box(T) {
             if (self.outstanding_imm > 0) {
                 @panic("cannot get while BTreeMap has active immutable borrows");
             }
@@ -98,7 +99,7 @@ pub fn BTreeMap(comptime T: type) type {
         }
 
         pub fn getMut(self: *Self, key: u64) ?struct {
-            box: Box(T, 2, 0, 1),
+            box: BoxStateful(T, 2, 0, 1),
             map: *Self,
 
             const Borrow = @This();
@@ -174,7 +175,7 @@ pub fn BTreeMap(comptime T: type) type {
             return result;
         }
 
-        fn rangeKeysNode(box: Box(Node, 0, 0, 0), range_min: u64, range_max: u64, allocator: std.mem.Allocator, result: *std.ArrayList(u64)) !void {
+        fn rangeKeysNode(box: Box(Node), range_min: u64, range_max: u64, allocator: std.mem.Allocator, result: *std.ArrayList(u64)) !void {
             const node = box.unsafePtr();
             if (node.left) |left| {
                 try rangeKeysNode(left, range_min, range_max, allocator, result);
@@ -192,7 +193,7 @@ pub fn BTreeMap(comptime T: type) type {
             return lowerBoundNode(root, key);
         }
 
-        fn lowerBoundNode(box: Box(Node, 0, 0, 0), key: u64) ?u64 {
+        fn lowerBoundNode(box: Box(Node), key: u64) ?u64 {
             const node = box.unsafePtr();
             if (node.key >= key) {
                 const left_best = if (node.left) |left| lowerBoundNode(left, key) else null;
@@ -207,7 +208,7 @@ pub fn BTreeMap(comptime T: type) type {
             return upperBoundNode(root, key);
         }
 
-        fn upperBoundNode(box: Box(Node, 0, 0, 0), key: u64) ?u64 {
+        fn upperBoundNode(box: Box(Node), key: u64) ?u64 {
             const node = box.unsafePtr();
             if (node.key > key) {
                 const left_best = if (node.left) |left| upperBoundNode(left, key) else null;
@@ -220,7 +221,7 @@ pub fn BTreeMap(comptime T: type) type {
         pub const Iter = struct {
             map: *Self,
 
-            pub fn next(self: *Iter) ?Box(T, 0, 0, 0) {
+            pub fn next(self: *Iter) ?Box(T) {
                 const key = self.map.min() orelse return null;
                 return self.map.get(key);
             }
@@ -233,13 +234,13 @@ pub fn BTreeMap(comptime T: type) type {
         pub const RevIter = struct {
             map: *Self,
 
-            pub fn next(self: *RevIter) ?Box(T, 0, 0, 0) {
+            pub fn next(self: *RevIter) ?Box(T) {
                 const key = self.map.max() orelse return null;
                 return self.map.get(key);
             }
         };
 
-        fn findNode(box: Box(Node, 0, 0, 0), key: u64) ?*Node {
+        fn findNode(box: Box(Node), key: u64) ?*Node {
             const node = box.unsafePtr();
             if (key == node.key) {
                 return node;
@@ -252,7 +253,7 @@ pub fn BTreeMap(comptime T: type) type {
             }
         }
 
-        fn findMinKey(box: Box(Node, 0, 0, 0)) u64 {
+        fn findMinKey(box: Box(Node)) u64 {
             var current = box;
             while (true) {
                 const node = current.unsafePtr();
@@ -264,7 +265,7 @@ pub fn BTreeMap(comptime T: type) type {
             }
         }
 
-        fn findMaxKey(box: Box(Node, 0, 0, 0)) u64 {
+        fn findMaxKey(box: Box(Node)) u64 {
             var current = box;
             while (true) {
                 const node = current.unsafePtr();
@@ -276,7 +277,7 @@ pub fn BTreeMap(comptime T: type) type {
             }
         }
 
-        fn removeNode(maybe_box: *?Box(Node, 0, 0, 0), key: u64) ?Box(T, 0, 0, 0) {
+        fn removeNode(maybe_box: *?Box(Node), key: u64) ?Box(T) {
             const box = maybe_box.* orelse return null;
             const node = box.unsafePtr();
             if (key == node.key) {
@@ -320,9 +321,9 @@ test "BTreeMap basic operations" {
     var map = BTreeMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put(3, try Box(i32, 0, 0, 0).init(std.testing.allocator, 30));
-    try map.put(1, try Box(i32, 0, 0, 0).init(std.testing.allocator, 10));
-    try map.put(2, try Box(i32, 0, 0, 0).init(std.testing.allocator, 20));
+    try map.put(3, try Box(i32).init(std.testing.allocator, 30));
+    try map.put(1, try Box(i32).init(std.testing.allocator, 10));
+    try map.put(2, try Box(i32).init(std.testing.allocator, 20));
 
     try std.testing.expectEqual(@as(usize, 3), map.len());
     try std.testing.expect(map.contains(1));
@@ -354,7 +355,7 @@ test "BTreeMap getMut" {
     var map = BTreeMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put(5, try Box(i32, 0, 0, 0).init(std.testing.allocator, 50));
+    try map.put(5, try Box(i32).init(std.testing.allocator, 50));
 
     const borrow = map.getMut(5).?;
     borrow.box.ptr.* = 55;
@@ -370,9 +371,9 @@ test "BTreeMap iterator" {
     var map = BTreeMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put(3, try Box(i32, 0, 0, 0).init(std.testing.allocator, 300));
-    try map.put(1, try Box(i32, 0, 0, 0).init(std.testing.allocator, 100));
-    try map.put(2, try Box(i32, 0, 0, 0).init(std.testing.allocator, 200));
+    try map.put(3, try Box(i32).init(std.testing.allocator, 300));
+    try map.put(1, try Box(i32).init(std.testing.allocator, 100));
+    try map.put(2, try Box(i32).init(std.testing.allocator, 200));
 
     var iter = map.iterator();
     const v1 = iter.next().?;
@@ -398,9 +399,9 @@ test "BTreeMap rev iterator" {
     var map = BTreeMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put(3, try Box(i32, 0, 0, 0).init(std.testing.allocator, 300));
-    try map.put(1, try Box(i32, 0, 0, 0).init(std.testing.allocator, 100));
-    try map.put(2, try Box(i32, 0, 0, 0).init(std.testing.allocator, 200));
+    try map.put(3, try Box(i32).init(std.testing.allocator, 300));
+    try map.put(1, try Box(i32).init(std.testing.allocator, 100));
+    try map.put(2, try Box(i32).init(std.testing.allocator, 200));
 
     var iter = map.rev();
     const v1 = iter.next().?;
@@ -426,8 +427,8 @@ test "BTreeMap replace" {
     var map = BTreeMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put(1, try Box(i32, 0, 0, 0).init(std.testing.allocator, 10));
-    try map.put(1, try Box(i32, 0, 0, 0).init(std.testing.allocator, 11));
+    try map.put(1, try Box(i32).init(std.testing.allocator, 10));
+    try map.put(1, try Box(i32).init(std.testing.allocator, 11));
 
     try std.testing.expectEqual(@as(usize, 1), map.len());
     const val = map.get(1).?;
@@ -440,11 +441,11 @@ test "BTreeMap rangeKeys" {
     var map = BTreeMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put(3, try Box(i32, 0, 0, 0).init(std.testing.allocator, 300));
-    try map.put(1, try Box(i32, 0, 0, 0).init(std.testing.allocator, 100));
-    try map.put(5, try Box(i32, 0, 0, 0).init(std.testing.allocator, 500));
-    try map.put(2, try Box(i32, 0, 0, 0).init(std.testing.allocator, 200));
-    try map.put(4, try Box(i32, 0, 0, 0).init(std.testing.allocator, 400));
+    try map.put(3, try Box(i32).init(std.testing.allocator, 300));
+    try map.put(1, try Box(i32).init(std.testing.allocator, 100));
+    try map.put(5, try Box(i32).init(std.testing.allocator, 500));
+    try map.put(2, try Box(i32).init(std.testing.allocator, 200));
+    try map.put(4, try Box(i32).init(std.testing.allocator, 400));
 
     var keys = try map.rangeKeys(2, 4, std.testing.allocator);
     defer keys.deinit(std.testing.allocator);
@@ -459,9 +460,9 @@ test "BTreeMap lowerBound" {
     var map = BTreeMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put(10, try Box(i32, 0, 0, 0).init(std.testing.allocator, 100));
-    try map.put(20, try Box(i32, 0, 0, 0).init(std.testing.allocator, 200));
-    try map.put(30, try Box(i32, 0, 0, 0).init(std.testing.allocator, 300));
+    try map.put(10, try Box(i32).init(std.testing.allocator, 100));
+    try map.put(20, try Box(i32).init(std.testing.allocator, 200));
+    try map.put(30, try Box(i32).init(std.testing.allocator, 300));
 
     try std.testing.expectEqual(@as(?u64, 10), map.lowerBound(5));
     try std.testing.expectEqual(@as(?u64, 20), map.lowerBound(20));
@@ -473,9 +474,9 @@ test "BTreeMap upperBound" {
     var map = BTreeMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put(10, try Box(i32, 0, 0, 0).init(std.testing.allocator, 100));
-    try map.put(20, try Box(i32, 0, 0, 0).init(std.testing.allocator, 200));
-    try map.put(30, try Box(i32, 0, 0, 0).init(std.testing.allocator, 300));
+    try map.put(10, try Box(i32).init(std.testing.allocator, 100));
+    try map.put(20, try Box(i32).init(std.testing.allocator, 200));
+    try map.put(30, try Box(i32).init(std.testing.allocator, 300));
 
     try std.testing.expectEqual(@as(?u64, 10), map.upperBound(5));
     try std.testing.expectEqual(@as(?u64, 20), map.upperBound(10));

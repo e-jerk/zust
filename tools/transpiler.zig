@@ -181,7 +181,7 @@ pub const Transpiler = struct {
                 const type_text = source[type_span.start..type_span.end];
 
                 const call_span = ast.nodeToSpan(node);
-                const repl = try std.fmt.allocPrint(self.allocator, "safe.Box({s}, 0, 0, 0).init(allocator, undefined)", .{type_text});
+                const repl = try std.fmt.allocPrint(self.allocator, "safe.Box({s}).init(allocator, undefined)", .{type_text});
                 try self.addEdit(call_span.start, call_span.end, repl);
             }
         }
@@ -628,7 +628,7 @@ test "pattern 1: allocator.create/destroy → safe.Box" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.Box(i32, 0, 0, 0).init(allocator, undefined)"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.Box(i32).init(allocator, undefined)"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "defer _ = ptr.deinit()"));
 }
 

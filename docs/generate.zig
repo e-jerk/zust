@@ -191,7 +191,7 @@ const comparisons = [_]Comparison{
         .zust =
             \\const safe = @import("safe");
             \\fn foo(allocator: std.mem.Allocator) !void {
-            \\    var b = try safe.Box(i32, 0, 0, 0).init(allocator, 42);
+            \\    var b = try safe.Box(i32).init(allocator, 42);
             \\    std.debug.print("{d}", .{b.ptr.*});
             \\    _ = b.deinit(); // type error if forgotten
             \\}

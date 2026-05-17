@@ -61,19 +61,19 @@ test "fuzz: Box lifecycle" {
 
         switch (action) {
             0 => { // Create and immediately destroy
-                const box = try safe.Box(i32, 0, 0, 0).init(allocator, value);
+                const box = try safe.Box(i32).init(allocator, value);
                 const dead = box.deinit();
                 _ = dead;
             },
             1 => { // Create, borrow imm, release, destroy
-                const box = try safe.Box(i32, 0, 0, 0).init(allocator, value);
+                const box = try safe.Box(i32).init(allocator, value);
                 const b = box.borrowImm();
                 const back = b.releaseImm();
                 const dead = back.deinit();
                 _ = dead;
             },
             2 => { // Create, borrow mut, modify, release, destroy
-                const box = try safe.Box(i32, 0, 0, 0).init(allocator, value);
+                const box = try safe.Box(i32).init(allocator, value);
                 const b = box.borrowMut();
                 b.ptr.* = value +% 1;
                 const back = b.releaseMut();
@@ -81,7 +81,7 @@ test "fuzz: Box lifecycle" {
                 _ = dead;
             },
             3 => { // Create, withImm closure, destroy
-                const box = try safe.Box(i32, 0, 0, 0).init(allocator, value);
+                const box = try safe.Box(i32).init(allocator, value);
                 var sum: i32 = 0;
                 box.withImm(&sum, struct {
                     fn f(ctx: *i32, val: *const i32) void {
@@ -92,9 +92,9 @@ test "fuzz: Box lifecycle" {
                 _ = dead;
             },
             4 => { // Create, withMut closure, destroy
-                var box = try safe.Box(i32, 0, 0, 0).init(allocator, value);
+                var box = try safe.Box(i32).init(allocator, value);
                 box.withMut(&box, struct {
-                    fn f(_: *safe.Box(i32, 0, 0, 0), val: *i32) void {
+                    fn f(_: *safe.Box(i32), val: *i32) void {
                         val.* = val.* *% 2;
                     }
                 }.f);
@@ -183,7 +183,7 @@ test "fuzz: HashMap operations" {
                     }
                     key_lens[num_keys] = key_len;
                     const key = keys[num_keys][0..key_len];
-                    const box = try safe.Box(u32, 0, 0, 0).init(allocator, value);
+                    const box = try safe.Box(u32).init(allocator, value);
                     try map.put(key, box);
                     num_keys += 1;
                 }

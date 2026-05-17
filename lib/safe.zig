@@ -3,6 +3,7 @@
 const std = @import("std");
 pub const Default = @import("Default.zig").Default;
 pub const Box = @import("Box.zig").Box;
+pub const BoxStateful = @import("Box.zig").BoxStateful;
 pub const LinkedList = @import("LinkedList.zig").LinkedList;
 pub const ArrayList = @import("ArrayList.zig").ArrayList;
 pub const Arc = @import("Arc.zig").Arc;
@@ -179,13 +180,13 @@ pub const GuardedSlice = @import("OffsetGuard.zig").GuardedSlice;
 pub const OffsetPtr = @import("OffsetGuard.zig").OffsetPtr;
 
 test "Box init and deinit" {
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     const dead = box.deinit();
     _ = dead;
 }
 
 test "Box immutable borrow and release" {
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     const b1 = box.borrowImm();
     const b2 = b1.borrowImm();
     const b1_back = b2.releaseImm();
@@ -195,7 +196,7 @@ test "Box immutable borrow and release" {
 }
 
 test "Box mutable borrow and release" {
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     const borrowed = box.borrowMut();
     borrowed.ptr.* = 100;
     const box_back = borrowed.releaseMut();
@@ -204,17 +205,17 @@ test "Box mutable borrow and release" {
 }
 
 test "Box ownership transfer by parameter passing" {
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     takeOwnership(box);
 }
 
-fn takeOwnership(b: Box(u32, 0, 0, 0)) void {
+fn takeOwnership(b: Box(u32)) void {
     const dead = b.deinit();
     _ = dead;
 }
 
 test "Box withImm closure" {
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     var sum: u32 = 0;
     box.withImm(&sum, struct {
         fn f(ctx: *u32, val: *const u32) void {
@@ -227,9 +228,9 @@ test "Box withImm closure" {
 }
 
 test "Box withMut closure" {
-    var box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    var box = try Box(u32).init(std.testing.allocator, 42);
     box.withMut(&box, struct {
-        fn f(_: *Box(u32, 0, 0, 0), val: *u32) void {
+        fn f(_: *Box(u32), val: *u32) void {
             val.* = 100;
         }
     }.f);
@@ -344,9 +345,9 @@ test "ArrayList append and get" {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
 
-    const b1 = try Box(u32, 0, 0, 0).init(std.testing.allocator, 10);
-    const b2 = try Box(u32, 0, 0, 0).init(std.testing.allocator, 20);
-    const b3 = try Box(u32, 0, 0, 0).init(std.testing.allocator, 30);
+    const b1 = try Box(u32).init(std.testing.allocator, 10);
+    const b2 = try Box(u32).init(std.testing.allocator, 20);
+    const b3 = try Box(u32).init(std.testing.allocator, 30);
 
     try list.append(b1);
     try list.append(b2);
@@ -368,7 +369,7 @@ test "ArrayList getMut" {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
 
-    const b = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const b = try Box(u32).init(std.testing.allocator, 42);
     try list.append(b);
 
     const maybe_borrow = list.getMut(0);
@@ -390,7 +391,7 @@ test "ArrayList borrowImm and releaseImm" {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
 
-    const b = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const b = try Box(u32).init(std.testing.allocator, 42);
     try list.append(b);
 
     const maybe_borrow = list.borrowImm(0);
@@ -405,7 +406,7 @@ test "ArrayList pop" {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
 
-    const b = try Box(u32, 0, 0, 0).init(std.testing.allocator, 100);
+    const b = try Box(u32).init(std.testing.allocator, 100);
     try list.append(b);
 
     const popped = list.pop();
@@ -420,7 +421,7 @@ test "ArrayList withImm closure" {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
 
-    const b = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const b = try Box(u32).init(std.testing.allocator, 42);
     try list.append(b);
 
     var sum: u32 = 0;
@@ -436,9 +437,9 @@ test "ArrayList swapRemove" {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
 
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 30));
+    try list.append(try Box(u32).init(std.testing.allocator, 10));
+    try list.append(try Box(u32).init(std.testing.allocator, 20));
+    try list.append(try Box(u32).init(std.testing.allocator, 30));
 
     const removed = list.swapRemove(0);
     try std.testing.expect(removed != null);
@@ -458,10 +459,10 @@ test "ArrayList retain" {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
 
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 1));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 2));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 3));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 4));
+    try list.append(try Box(u32).init(std.testing.allocator, 1));
+    try list.append(try Box(u32).init(std.testing.allocator, 2));
+    try list.append(try Box(u32).init(std.testing.allocator, 3));
+    try list.append(try Box(u32).init(std.testing.allocator, 4));
 
     list.retain({}, struct {
         fn f(_: void, val: *const u32) bool {
@@ -486,9 +487,9 @@ test "ArrayList resize shrink" {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
 
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 30));
+    try list.append(try Box(u32).init(std.testing.allocator, 10));
+    try list.append(try Box(u32).init(std.testing.allocator, 20));
+    try list.append(try Box(u32).init(std.testing.allocator, 30));
 
     try list.resize(1);
     try std.testing.expectEqual(list.len(), 1);
@@ -504,13 +505,13 @@ test "ArrayList resize grow" {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
 
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 42));
+    try list.append(try Box(u32).init(std.testing.allocator, 42));
     try list.resize(3);
     try std.testing.expectEqual(list.len(), 3);
 
     // Overwrite undefined new slots with valid boxes so deinit is safe
-    list.items.items[1] = try Box(u32, 0, 0, 0).init(std.testing.allocator, 1);
-    list.items.items[2] = try Box(u32, 0, 0, 0).init(std.testing.allocator, 2);
+    list.items.items[1] = try Box(u32).init(std.testing.allocator, 1);
+    list.items.items[2] = try Box(u32).init(std.testing.allocator, 2);
 
     const got = list.get(0);
     try std.testing.expect(got != null);
@@ -523,8 +524,8 @@ test "ArrayList clear" {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
 
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
+    try list.append(try Box(u32).init(std.testing.allocator, 10));
+    try list.append(try Box(u32).init(std.testing.allocator, 20));
     list.clear();
     try std.testing.expectEqual(list.len(), 0);
 }
@@ -534,7 +535,7 @@ test "ArrayList ensureCapacity" {
     defer list.deinit();
 
     try list.ensureCapacity(10);
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 1));
+    try list.append(try Box(u32).init(std.testing.allocator, 1));
     try std.testing.expectEqual(list.len(), 1);
 }
 
@@ -542,9 +543,9 @@ test "ArrayList findLast" {
     var list = ArrayList(u8).init(std.testing.allocator);
     defer list.deinit();
 
-    try list.append(try Box(u8, 0, 0, 0).init(std.testing.allocator, 'a'));
-    try list.append(try Box(u8, 0, 0, 0).init(std.testing.allocator, 'b'));
-    try list.append(try Box(u8, 0, 0, 0).init(std.testing.allocator, 'a'));
+    try list.append(try Box(u8).init(std.testing.allocator, 'a'));
+    try list.append(try Box(u8).init(std.testing.allocator, 'b'));
+    try list.append(try Box(u8).init(std.testing.allocator, 'a'));
 
     try std.testing.expectEqual(list.findLast('a'), 2);
     try std.testing.expectEqual(list.findLast('b'), 1);
@@ -666,7 +667,7 @@ test "Mutex withLock" {
 // === Scope Tests ===
 
 test "ScopeImm borrow and release" {
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     var borrowed = ScopeImm(u32).borrow(box);
     try std.testing.expectEqual(borrowed.scope.ptr().*, 42);
     const back = borrowed.scope.release();
@@ -675,7 +676,7 @@ test "ScopeImm borrow and release" {
 }
 
 test "ScopeMut borrow and release" {
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     var borrowed = ScopeMut(u32).borrow(box);
     borrowed.scope.ptr().* = 100;
     const back = borrowed.scope.release();
@@ -806,20 +807,20 @@ test "RwLockWriteGuard acquire and auto-release" {
 // Uncomment one at a time to verify @compileError
 
 // test "compile_error: double_free" {
-//     const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+//     const box = try Box(u32).init(std.testing.allocator, 42);
 //     const dead = box.deinit();
 //     const dead2 = dead.deinit(); // Expected: "double free detected"
 //     _ = dead2;
 // }
 
 // test "compile_error: free_with_active_borrows" {
-//     const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+//     const box = try Box(u32).init(std.testing.allocator, 42);
 //     const b1 = box.borrowImm();
 //     b1.deinit(); // Expected: "cannot free: value is not in Owned state"
 // }
 
 // test "compile_error: borrow_mut_while_imm_active" {
-//     const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+//     const box = try Box(u32).init(std.testing.allocator, 42);
 //     const b1 = box.borrowImm();
 //     const mut = b1.borrowMut(); // Expected: "cannot borrow mutably: active immutable borrows exist"
 //     _ = mut;
@@ -831,7 +832,7 @@ test "HashMap put and get" {
     var map = HashMap(u32).init(std.testing.allocator);
     defer map.deinit();
 
-    const b1 = try Box(u32, 0, 0, 0).init(std.testing.allocator, 100);
+    const b1 = try Box(u32).init(std.testing.allocator, 100);
     try map.put("key1", b1);
 
     try std.testing.expect(map.contains("key1"));
@@ -852,7 +853,7 @@ test "HashMap getMut" {
     var map = HashMap(u32).init(std.testing.allocator);
     defer map.deinit();
 
-    const b = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const b = try Box(u32).init(std.testing.allocator, 42);
     try map.put("key1", b);
 
     const maybe_borrow = map.getMut("key1");
@@ -872,7 +873,7 @@ test "HashMap remove" {
     var map = HashMap(u32).init(std.testing.allocator);
     defer map.deinit();
 
-    const b = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const b = try Box(u32).init(std.testing.allocator, 42);
     try map.put("key1", b);
 
     const removed = map.remove("key1");
@@ -891,7 +892,7 @@ test "HashMap borrowImm" {
     var map = HashMap(u32).init(std.testing.allocator);
     defer map.deinit();
 
-    const b = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const b = try Box(u32).init(std.testing.allocator, 42);
     try map.put("key1", b);
 
     const maybe_borrow = map.borrowImm("key1");
@@ -904,10 +905,10 @@ test "HashMap replace existing" {
     var map = HashMap(u32).init(std.testing.allocator);
     defer map.deinit();
 
-    const b1 = try Box(u32, 0, 0, 0).init(std.testing.allocator, 10);
+    const b1 = try Box(u32).init(std.testing.allocator, 10);
     try map.put("key1", b1);
 
-    const b2 = try Box(u32, 0, 0, 0).init(std.testing.allocator, 20);
+    const b2 = try Box(u32).init(std.testing.allocator, 20);
     try map.put("key1", b2);
 
     const got = map.get("key1");
@@ -922,7 +923,7 @@ test "HashMap Entry orInsert" {
     defer map.deinit();
 
     // Insert new value via entry
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     const e = map.entry("key1");
     try std.testing.expect(!e.isOccupied());
     try std.testing.expectEqual(e.getKey(), "key1");
@@ -932,7 +933,7 @@ test "HashMap Entry orInsert" {
     try std.testing.expectEqual(map.len(), 1);
 
     // Existing entry - orInsert returns existing, deinits unused box
-    const box2 = try Box(u32, 0, 0, 0).init(std.testing.allocator, 100);
+    const box2 = try Box(u32).init(std.testing.allocator, 100);
     const e2 = map.entry("key1");
     try std.testing.expect(e2.isOccupied());
     const ptr2 = try e2.orInsert(box2);
@@ -946,8 +947,8 @@ test "HashMap Entry orInsertWith" {
 
     const e = map.entry("key1");
     const ptr = try e.orInsertWith(10, struct {
-        fn f(ctx: u32) !Box(u32, 0, 0, 0) {
-            return Box(u32, 0, 0, 0).init(std.testing.allocator, ctx);
+        fn f(ctx: u32) !Box(u32) {
+            return Box(u32).init(std.testing.allocator, ctx);
         }
     }.f);
     try std.testing.expectEqual(ptr.ptr.*, 10);
@@ -957,8 +958,8 @@ test "HashMap Entry orInsertWith" {
     // Existing entry - factory not called, returns existing
     const e2 = map.entry("key1");
     const ptr2 = try e2.orInsertWith(99, struct {
-        fn f(ctx: u32) !Box(u32, 0, 0, 0) {
-            return Box(u32, 0, 0, 0).init(std.testing.allocator, ctx);
+        fn f(ctx: u32) !Box(u32) {
+            return Box(u32).init(std.testing.allocator, ctx);
         }
     }.f);
     try std.testing.expectEqual(ptr2.ptr.*, 10); // Still 10
@@ -968,7 +969,7 @@ test "HashMap Entry andModify" {
     var map = HashMap(u32).init(std.testing.allocator);
     defer map.deinit();
 
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     try map.put("key1", box);
 
     const e = map.entry("key1");
@@ -1006,13 +1007,13 @@ test "HashMap getOrPut" {
     var map = HashMap(u32).init(std.testing.allocator);
     defer map.deinit();
 
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     const ptr = try map.getOrPut("key1", box);
     try std.testing.expectEqual(ptr.ptr.*, 42);
     try std.testing.expect(map.contains("key1"));
 
     // getOrPut on existing key returns existing, deinits unused box
-    const box2 = try Box(u32, 0, 0, 0).init(std.testing.allocator, 100);
+    const box2 = try Box(u32).init(std.testing.allocator, 100);
     const ptr2 = try map.getOrPut("key1", box2);
     try std.testing.expectEqual(ptr2.ptr.*, 42); // Still 42
     try std.testing.expectEqual(map.len(), 1);
@@ -1028,10 +1029,10 @@ test "HashMap retain" {
     var map = HashMap(u32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put("a", try Box(u32, 0, 0, 0).init(std.testing.allocator, 1));
-    try map.put("b", try Box(u32, 0, 0, 0).init(std.testing.allocator, 2));
-    try map.put("c", try Box(u32, 0, 0, 0).init(std.testing.allocator, 3));
-    try map.put("d", try Box(u32, 0, 0, 0).init(std.testing.allocator, 4));
+    try map.put("a", try Box(u32).init(std.testing.allocator, 1));
+    try map.put("b", try Box(u32).init(std.testing.allocator, 2));
+    try map.put("c", try Box(u32).init(std.testing.allocator, 3));
+    try map.put("d", try Box(u32).init(std.testing.allocator, 4));
 
     map.retain({}, struct {
         fn f(_: void, key: []const u8, val: *const u32) bool {
@@ -1051,8 +1052,8 @@ test "HashMap drain" {
     var map = HashMap(u32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put("a", try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try map.put("b", try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
+    try map.put("a", try Box(u32).init(std.testing.allocator, 10));
+    try map.put("b", try Box(u32).init(std.testing.allocator, 20));
 
     var iter = map.drain();
 
@@ -1079,8 +1080,8 @@ test "HashMap clear" {
     var map = HashMap(u32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put("a", try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try map.put("b", try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
+    try map.put("a", try Box(u32).init(std.testing.allocator, 10));
+    try map.put("b", try Box(u32).init(std.testing.allocator, 20));
 
     map.clear();
     try std.testing.expectEqual(map.len(), 0);
@@ -1234,7 +1235,7 @@ test "Weak strongCount and weakCount" {
 // === Slice Tests ===
 
 test "Slice from Box array" {
-    const box = try Box([3]u32, 0, 0, 0).init(std.testing.allocator, .{ 1, 2, 3 });
+    const box = try Box([3]u32).init(std.testing.allocator, .{ 1, 2, 3 });
     const s = Slice(u32).fromBoxArray(box);
     try std.testing.expectEqual(s.len(), 3);
     try std.testing.expectEqual(s.get(0).?, 1);
@@ -1308,9 +1309,9 @@ test "VecDeque pushBack and popBack" {
     var dq = try VecDeque(u32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 30));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 10));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 20));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 30));
 
     try std.testing.expectEqual(dq.count(), 3);
 
@@ -1333,9 +1334,9 @@ test "VecDeque pushFront and popFront" {
     var dq = try VecDeque(u32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushFront(try Box(u32, 0, 0, 0).init(std.testing.allocator, 30));
-    try dq.pushFront(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
-    try dq.pushFront(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
+    try dq.pushFront(try Box(u32).init(std.testing.allocator, 30));
+    try dq.pushFront(try Box(u32).init(std.testing.allocator, 20));
+    try dq.pushFront(try Box(u32).init(std.testing.allocator, 10));
 
     try std.testing.expectEqual(dq.count(), 3);
 
@@ -1350,8 +1351,8 @@ test "VecDeque get" {
     var dq = try VecDeque(u32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 100));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 200));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 100));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 200));
 
     const got = dq.get(1);
     try std.testing.expect(got != null);
@@ -1362,9 +1363,9 @@ test "VecDeque rotateLeft" {
     var dq = try VecDeque(u32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 30));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 10));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 20));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 30));
 
     dq.rotateLeft(1);
 
@@ -1379,9 +1380,9 @@ test "VecDeque rotateRight" {
     var dq = try VecDeque(u32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 30));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 10));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 20));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 30));
 
     dq.rotateRight(1);
 
@@ -1396,10 +1397,10 @@ test "VecDeque retain" {
     var dq = try VecDeque(u32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 1));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 2));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 3));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 4));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 1));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 2));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 3));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 4));
 
     dq.retain({}, struct {
         fn f(_: void, val: *const u32) bool {
@@ -1424,8 +1425,8 @@ test "VecDeque resize grow" {
     var dq = try VecDeque(u32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    const default = try Box(u32, 0, 0, 0).init(std.testing.allocator, 99);
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 10));
+    const default = try Box(u32).init(std.testing.allocator, 99);
     try dq.resize(3, default);
     try std.testing.expectEqual(dq.count(), 3);
 
@@ -1446,11 +1447,11 @@ test "VecDeque resize shrink" {
     var dq = try VecDeque(u32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 30));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 10));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 20));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 30));
 
-    const default = try Box(u32, 0, 0, 0).init(std.testing.allocator, 0);
+    const default = try Box(u32).init(std.testing.allocator, 0);
     try dq.resize(1, default);
     try std.testing.expectEqual(dq.count(), 1);
 
@@ -1465,9 +1466,9 @@ test "VecDeque truncate" {
     var dq = try VecDeque(u32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 30));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 10));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 20));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 30));
 
     dq.truncate(1);
     try std.testing.expectEqual(dq.count(), 1);
@@ -1500,9 +1501,9 @@ test "ArrayList iterator" {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
 
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 30));
+    try list.append(try Box(u32).init(std.testing.allocator, 10));
+    try list.append(try Box(u32).init(std.testing.allocator, 20));
+    try list.append(try Box(u32).init(std.testing.allocator, 30));
 
     var it = list.iterator();
     // pop() removes from the end, so iteration is LIFO
@@ -1528,9 +1529,9 @@ test "VecDeque iterator" {
     var dq = try VecDeque(u32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 30));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 10));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 20));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 30));
 
     var it = dq.iterator();
     const first = it.next();
@@ -1956,9 +1957,9 @@ test "BinaryHeap peekMut" {
     }.f);
     defer heap.deinit();
 
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 10));
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 30));
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 20));
+    try heap.push(try Box(u64).init(std.testing.allocator, 10));
+    try heap.push(try Box(u64).init(std.testing.allocator, 30));
+    try heap.push(try Box(u64).init(std.testing.allocator, 20));
 
     const peek = heap.peekMut().?;
     try std.testing.expectEqual(@as(u64, 30), peek.*);
@@ -1978,10 +1979,10 @@ test "BinaryHeap drainSorted" {
     }.f);
     defer heap.deinit();
 
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 5));
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 1));
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 9));
-    try heap.push(try Box(u64, 0, 0, 0).init(std.testing.allocator, 3));
+    try heap.push(try Box(u64).init(std.testing.allocator, 5));
+    try heap.push(try Box(u64).init(std.testing.allocator, 1));
+    try heap.push(try Box(u64).init(std.testing.allocator, 9));
+    try heap.push(try Box(u64).init(std.testing.allocator, 3));
 
     var sorted = try heap.drainSorted(std.testing.allocator);
     defer {
@@ -2006,11 +2007,11 @@ test "BTreeMap rangeKeys" {
     var map = BTreeMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put(3, try Box(i32, 0, 0, 0).init(std.testing.allocator, 300));
-    try map.put(1, try Box(i32, 0, 0, 0).init(std.testing.allocator, 100));
-    try map.put(5, try Box(i32, 0, 0, 0).init(std.testing.allocator, 500));
-    try map.put(2, try Box(i32, 0, 0, 0).init(std.testing.allocator, 200));
-    try map.put(4, try Box(i32, 0, 0, 0).init(std.testing.allocator, 400));
+    try map.put(3, try Box(i32).init(std.testing.allocator, 300));
+    try map.put(1, try Box(i32).init(std.testing.allocator, 100));
+    try map.put(5, try Box(i32).init(std.testing.allocator, 500));
+    try map.put(2, try Box(i32).init(std.testing.allocator, 200));
+    try map.put(4, try Box(i32).init(std.testing.allocator, 400));
 
     var keys = try map.rangeKeys(2, 4, std.testing.allocator);
     defer keys.deinit(std.testing.allocator);
@@ -2025,9 +2026,9 @@ test "BTreeMap lowerBound" {
     var map = BTreeMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put(10, try Box(i32, 0, 0, 0).init(std.testing.allocator, 100));
-    try map.put(20, try Box(i32, 0, 0, 0).init(std.testing.allocator, 200));
-    try map.put(30, try Box(i32, 0, 0, 0).init(std.testing.allocator, 300));
+    try map.put(10, try Box(i32).init(std.testing.allocator, 100));
+    try map.put(20, try Box(i32).init(std.testing.allocator, 200));
+    try map.put(30, try Box(i32).init(std.testing.allocator, 300));
 
     try std.testing.expectEqual(@as(?u64, 10), map.lowerBound(5));
     try std.testing.expectEqual(@as(?u64, 20), map.lowerBound(20));
@@ -2039,9 +2040,9 @@ test "BTreeMap upperBound" {
     var map = BTreeMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put(10, try Box(i32, 0, 0, 0).init(std.testing.allocator, 100));
-    try map.put(20, try Box(i32, 0, 0, 0).init(std.testing.allocator, 200));
-    try map.put(30, try Box(i32, 0, 0, 0).init(std.testing.allocator, 300));
+    try map.put(10, try Box(i32).init(std.testing.allocator, 100));
+    try map.put(20, try Box(i32).init(std.testing.allocator, 200));
+    try map.put(30, try Box(i32).init(std.testing.allocator, 300));
 
     try std.testing.expectEqual(@as(?u64, 10), map.upperBound(5));
     try std.testing.expectEqual(@as(?u64, 20), map.upperBound(10));
@@ -2059,7 +2060,7 @@ test "HashMap isEmpty" {
     try std.testing.expect(map.isEmpty());
     try std.testing.expectEqual(map.len(), 0);
 
-    const b = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const b = try Box(u32).init(std.testing.allocator, 42);
     try map.put("key1", b);
 
     try std.testing.expect(!map.isEmpty());

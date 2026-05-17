@@ -1,5 +1,6 @@
 const std = @import("std");
 const Box = @import("Box.zig").Box;
+const BoxStateful = @import("Box.zig").BoxStateful;
 
 /// Non-lexical lifetime (NLL) scope guards.
 ///
@@ -8,7 +9,7 @@ const Box = @import("Box.zig").Box;
 ///
 /// Usage:
 /// ```zig
-/// const box = try Box(u32, 0, 0, 0).init(allocator, 42);
+/// const box = try Box(u32).init(allocator, 42);
 /// {
 ///     const scope = Scope.borrowImm(&box);
 ///     std.debug.print("{d}\n", .{scope.ptr.*});
@@ -18,15 +19,15 @@ const Box = @import("Box.zig").Box;
 /// Immutable borrow scope. Releases when deinitialized.
 pub fn ScopeImm(comptime T: type) type {
     return struct {
-        box: Box(T, 1, 1, 0),
-        owner: ?*Box(T, 0, 0, 0),
+        box: BoxStateful(T, 1, 1, 0),
+        owner: ?*Box(T),
 
         const Self = @This();
 
         /// Borrow from an owned box.
-        pub fn borrow(box: Box(T, 0, 0, 0)) struct {
+        pub fn borrow(box: Box(T)) struct {
             scope: Self,
-            owner: Box(T, 0, 0, 0),
+            owner: Box(T),
         } {
             const borrowed = box.borrowImm();
             return .{
@@ -36,7 +37,7 @@ pub fn ScopeImm(comptime T: type) type {
         }
 
         /// Release the borrow.
-        pub fn release(self: *Self) Box(T, 0, 0, 0) {
+        pub fn release(self: *Self) Box(T) {
             const back = self.box.releaseImm();
             self.owner = null;
             return back;
@@ -51,15 +52,15 @@ pub fn ScopeImm(comptime T: type) type {
 /// Mutable borrow scope. Releases when deinitialized.
 pub fn ScopeMut(comptime T: type) type {
     return struct {
-        box: Box(T, 2, 0, 1),
-        owner: ?*Box(T, 0, 0, 0),
+        box: BoxStateful(T, 2, 0, 1),
+        owner: ?*Box(T),
 
         const Self = @This();
 
         /// Borrow mutably from an owned box.
-        pub fn borrow(box: Box(T, 0, 0, 0)) struct {
+        pub fn borrow(box: Box(T)) struct {
             scope: Self,
-            owner: Box(T, 0, 0, 0),
+            owner: Box(T),
         } {
             const borrowed = box.borrowMut();
             return .{
@@ -69,7 +70,7 @@ pub fn ScopeMut(comptime T: type) type {
         }
 
         /// Release the borrow.
-        pub fn release(self: *Self) Box(T, 0, 0, 0) {
+        pub fn release(self: *Self) Box(T) {
             const back = self.box.releaseMut();
             self.owner = null;
             return back;

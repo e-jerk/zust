@@ -1,10 +1,11 @@
 const std = @import("std");
 const Box = @import("Box.zig").Box;
+const BoxStateful = @import("Box.zig").BoxStateful;
 
 /// Prevents moving values in memory.
 ///
 /// Pattern: Similar to Rust's `std::pin::Pin<Box<T>>`.
-/// Wraps a heap-allocated `Box(T, 0, 0, 0)` and guarantees the pointee
+/// Wraps a heap-allocated `Box(T)` and guarantees the pointee
 /// will not be relocated.  Mutable access is still allowed – only moving
 /// is prevented.
 pub fn Pin(comptime T: type) type {
@@ -15,7 +16,7 @@ pub fn Pin(comptime T: type) type {
         const Self = @This();
 
         /// Take ownership of a `Box`.
-        pub fn init(box: Box(T, 0, 0, 0)) Self {
+        pub fn init(box: Box(T)) Self {
             return .{
                 .ptr = box.ptr,
                 .allocator = box.allocator,
@@ -23,7 +24,7 @@ pub fn Pin(comptime T: type) type {
         }
 
         /// Destroy the owned heap value and return a dead-box token.
-        pub fn deinit(self: *Self) Box(T, 4, 0, 0) {
+        pub fn deinit(self: *Self) BoxStateful(T, 4, 0, 0) {
             self.allocator.destroy(self.ptr);
             return .{
                 .ptr = undefined,
@@ -52,7 +53,7 @@ pub fn Pin(comptime T: type) type {
 
 test "Pin basic usage" {
     const allocator = std.testing.allocator;
-    const box = try Box(i32, 0, 0, 0).init(allocator, 42);
+    const box = try Box(i32).init(allocator, 42);
     var pin = Pin(i32).init(box);
 
     try std.testing.expectEqual(@as(i32, 42), pin.get().*);
@@ -63,7 +64,7 @@ test "Pin basic usage" {
 
 test "Pin mutable access" {
     const allocator = std.testing.allocator;
-    const box = try Box(i32, 0, 0, 0).init(allocator, 10);
+    const box = try Box(i32).init(allocator, 10);
     var pin = Pin(i32).init(box);
 
     pin.getMut().* = 20;
@@ -74,7 +75,7 @@ test "Pin mutable access" {
 
 test "Pin asRef" {
     const allocator = std.testing.allocator;
-    const box = try Box(i32, 0, 0, 0).init(allocator, 99);
+    const box = try Box(i32).init(allocator, 99);
     var pin = Pin(i32).init(box);
 
     const ref = pin.asRef();
@@ -90,7 +91,7 @@ test "Pin with struct" {
     };
 
     const allocator = std.testing.allocator;
-    const box = try Box(Point, 0, 0, 0).init(allocator, .{ .x = 1, .y = 2 });
+    const box = try Box(Point).init(allocator, .{ .x = 1, .y = 2 });
     var pin = Pin(Point).init(box);
 
     try std.testing.expectEqual(@as(i32, 1), pin.get().x);

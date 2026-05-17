@@ -62,8 +62,8 @@ pub fn StackRef(comptime T: type) type {
         }
 
         /// Safely convert to a heap Box by copying the value.
-        pub fn toBox(self: Self, allocator: std.mem.Allocator) !Box(T, 0, 0, 0) {
-            return try Box(T, 0, 0, 0).init(allocator, self.ptr.*);
+        pub fn toBox(self: Self, allocator: std.mem.Allocator) !Box(T) {
+            return try Box(T).init(allocator, self.ptr.*);
         }
     };
 }

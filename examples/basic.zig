@@ -12,7 +12,7 @@ pub fn main() !void {
 
     // Example 1: Basic ownership
     {
-        const box = try Box(u32, 0, 0, 0).init(allocator, 42);
+        const box = try Box(u32).init(allocator, 42);
         std.debug.print("Value: {d}\n", .{box.ptr.*});
         const dead = box.deinit();
         _ = dead;
@@ -20,7 +20,7 @@ pub fn main() !void {
 
     // Example 2: Immutable borrows
     {
-        const box = try Box(u32, 0, 0, 0).init(allocator, 100);
+        const box = try Box(u32).init(allocator, 100);
         const b1 = box.borrowImm();
         const b2 = b1.borrowImm();
         std.debug.print("Borrowed: {d}\n", .{b2.ptr.*});
@@ -32,7 +32,7 @@ pub fn main() !void {
 
     // Example 3: Mutable borrow
     {
-        const box = try Box(u32, 0, 0, 0).init(allocator, 0);
+        const box = try Box(u32).init(allocator, 0);
         const borrowed = box.borrowMut();
         borrowed.ptr.* = 999;
         std.debug.print("Mutated: {d}\n", .{borrowed.ptr.*});
@@ -43,7 +43,7 @@ pub fn main() !void {
 
     // Example 4: Closure API
     {
-        const box = try Box(u32, 0, 0, 0).init(allocator, 7);
+        const box = try Box(u32).init(allocator, 7);
         var sum: u32 = 0;
         box.withImm(&sum, struct {
             fn f(ctx: *u32, val: *const u32) void {

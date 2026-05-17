@@ -5,14 +5,14 @@ const Box = @import("Box.zig").Box;
 /// Provides O(log n) insertion, removal, and lookup on average.
 /// Not self-balancing; worst case is O(n) for skewed input.
 pub const BTreeSet = struct {
-    root: ?Box(Node, 0, 0, 0),
+    root: ?Box(Node),
     allocator: std.mem.Allocator,
     count: usize,
 
     const Node = struct {
         key: u64,
-        left: ?Box(Node, 0, 0, 0),
-        right: ?Box(Node, 0, 0, 0),
+        left: ?Box(Node),
+        right: ?Box(Node),
     };
 
     const Self = @This();
@@ -28,7 +28,7 @@ pub const BTreeSet = struct {
         self.count = 0;
     }
 
-    fn deinitNode(node_box: Box(Node, 0, 0, 0)) void {
+    fn deinitNode(node_box: Box(Node)) void {
         const node = node_box.unsafePtr();
         if (node.left) |l| deinitNode(l);
         if (node.right) |r| deinitNode(r);
@@ -39,12 +39,12 @@ pub const BTreeSet = struct {
         self.root = try insertNode(self.allocator, self.root, key, &self.count);
     }
 
-    fn insertNode(allocator: std.mem.Allocator, maybe_node: ?Box(Node, 0, 0, 0), key: u64, count: *usize) !?Box(Node, 0, 0, 0) {
+    fn insertNode(allocator: std.mem.Allocator, maybe_node: ?Box(Node), key: u64, count: *usize) !?Box(Node) {
         const node_box = maybe_node orelse {
             const ptr = try allocator.create(Node);
             ptr.* = .{ .key = key, .left = null, .right = null };
             count.* += 1;
-            return Box(Node, 0, 0, 0){ .ptr = ptr, .allocator = allocator };
+            return Box(Node){ .ptr = ptr, .allocator = allocator };
         };
 
         const node = node_box.unsafePtr();
@@ -77,7 +77,7 @@ pub const BTreeSet = struct {
         self.root = removeNode(self.allocator, self.root, key, &self.count);
     }
 
-    fn removeNode(allocator: std.mem.Allocator, maybe_node: ?Box(Node, 0, 0, 0), key: u64, count: *usize) ?Box(Node, 0, 0, 0) {
+    fn removeNode(allocator: std.mem.Allocator, maybe_node: ?Box(Node), key: u64, count: *usize) ?Box(Node) {
         const node_box = maybe_node orelse return null;
         const node = node_box.unsafePtr();
 
@@ -116,7 +116,7 @@ pub const BTreeSet = struct {
         }
     }
 
-    fn findMin(node_box: Box(Node, 0, 0, 0)) u64 {
+    fn findMin(node_box: Box(Node)) u64 {
         const node = node_box.unsafePtr();
         if (node.left) |l| {
             return findMin(l);
@@ -150,7 +150,7 @@ pub const BTreeSet = struct {
         return result.toOwnedSlice(allocator);
     }
 
-    fn collectKeys(node_box: Box(Node, 0, 0, 0), list: *std.ArrayList(u64), allocator: std.mem.Allocator) !void {
+    fn collectKeys(node_box: Box(Node), list: *std.ArrayList(u64), allocator: std.mem.Allocator) !void {
         const node = node_box.unsafePtr();
         if (node.left) |l| {
             try collectKeys(l, list, allocator);

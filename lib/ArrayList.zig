@@ -1,13 +1,14 @@
 const std = @import("std");
 const Box = @import("Box.zig").Box;
+const BoxStateful = @import("Box.zig").BoxStateful;
 const SimdUtils = @import("SimdUtils.zig");
 
-/// A growable array that owns `Box(T, 0, 0, 0)` values.
+/// A growable array that owns `Box(T)` values.
 /// All items are stored in Owned state. Accessing an item borrows it
 /// from the list. The list tracks how many outstanding borrows exist.
 pub fn ArrayList(comptime T: type) type {
     return struct {
-        items: std.ArrayList(Box(T, 0, 0, 0)),
+        items: std.ArrayList(Box(T)),
         allocator: std.mem.Allocator,
         // Track outstanding borrows to prevent deinit while borrowed
         outstanding_imm: u32 = 0,
@@ -17,7 +18,7 @@ pub fn ArrayList(comptime T: type) type {
 
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
-                .items = std.ArrayList(Box(T, 0, 0, 0)).empty,
+                .items = std.ArrayList(Box(T)).empty,
                 .allocator = allocator,
             };
         }
@@ -44,7 +45,7 @@ pub fn ArrayList(comptime T: type) type {
             self.items.deinit(self.allocator);
         }
 
-        pub fn append(self: *Self, box: Box(T, 0, 0, 0)) !void {
+        pub fn append(self: *Self, box: Box(T)) !void {
             // Must not be mutably borrowed
             if (self.outstanding_mut > 0) {
                 @panic("cannot append while ArrayList is mutably borrowed");
@@ -70,7 +71,7 @@ pub fn ArrayList(comptime T: type) type {
 
         /// Get an item by value (transfers ownership OUT of the list).
         /// Panics if the list has active borrows.
-        pub fn get(self: *Self, index: usize) ?Box(T, 0, 0, 0) {
+        pub fn get(self: *Self, index: usize) ?Box(T) {
             if (self.outstanding_imm > 0) {
                 @panic("cannot get while ArrayList has active immutable borrows");
             }
@@ -98,7 +99,7 @@ pub fn ArrayList(comptime T: type) type {
         /// Get a mutable reference to an item (borrows mutably from the list).
         /// Returns null if index is out of bounds.
         pub fn getMut(self: *Self, index: usize) ?struct {
-            box: Box(T, 2, 0, 1),
+            box: BoxStateful(T, 2, 0, 1),
             list: *Self,
             index: usize,
 
@@ -124,7 +125,7 @@ pub fn ArrayList(comptime T: type) type {
             };
         }
 
-        pub fn pop(self: *Self) ?Box(T, 0, 0, 0) {
+        pub fn pop(self: *Self) ?Box(T) {
             if (self.outstanding_imm > 0) {
                 @panic("cannot pop while ArrayList has active immutable borrows");
             }
@@ -135,7 +136,7 @@ pub fn ArrayList(comptime T: type) type {
         }
 
         /// Pop the front value from the list.
-        pub fn popFront(self: *Self) ?Box(T, 0, 0, 0) {
+        pub fn popFront(self: *Self) ?Box(T) {
             if (self.outstanding_imm > 0) {
                 @panic("cannot popFront while ArrayList has active immutable borrows");
             }
@@ -159,7 +160,7 @@ pub fn ArrayList(comptime T: type) type {
         }
 
         pub fn borrowImm(self: *Self, index: usize) ?struct {
-            box: Box(T, 1, 1, 0),
+            box: BoxStateful(T, 1, 1, 0),
             list: *Self,
             index: usize,
 
@@ -184,7 +185,7 @@ pub fn ArrayList(comptime T: type) type {
         }
 
         pub fn borrowMut(self: *Self, index: usize) ?struct {
-            box: Box(T, 2, 0, 1),
+            box: BoxStateful(T, 2, 0, 1),
             list: *Self,
             index: usize,
 
@@ -227,7 +228,7 @@ pub fn ArrayList(comptime T: type) type {
             }
         }
 
-        pub fn swapRemove(self: *Self, index: usize) ?Box(T, 0, 0, 0) {
+        pub fn swapRemove(self: *Self, index: usize) ?Box(T) {
             if (self.outstanding_imm > 0) {
                 @panic("cannot swapRemove while ArrayList has active immutable borrows");
             }
@@ -318,14 +319,14 @@ pub fn ArrayList(comptime T: type) type {
             quickSort(self.items.items, context, lessThan, 0, self.items.items.len - 1);
         }
 
-        fn quickSort(items: []Box(T, 0, 0, 0), context: anytype, comptime lessThan: fn (@TypeOf(context), *const T, *const T) bool, left: usize, right: usize) void {
+        fn quickSort(items: []Box(T), context: anytype, comptime lessThan: fn (@TypeOf(context), *const T, *const T) bool, left: usize, right: usize) void {
             if (left >= right) return;
             const pivot = partition(items, context, lessThan, left, right);
             if (pivot > 0) quickSort(items, context, lessThan, left, pivot - 1);
             quickSort(items, context, lessThan, pivot + 1, right);
         }
 
-        fn partition(items: []Box(T, 0, 0, 0), context: anytype, comptime lessThan: fn (@TypeOf(context), *const T, *const T) bool, left: usize, right: usize) usize {
+        fn partition(items: []Box(T), context: anytype, comptime lessThan: fn (@TypeOf(context), *const T, *const T) bool, left: usize, right: usize) usize {
             const pivot_val = items[right];
             var i = left;
             var j = left;
@@ -354,7 +355,7 @@ pub fn ArrayList(comptime T: type) type {
         pub const Iter = struct {
             list: *Self,
 
-            pub fn next(self: *Iter) ?Box(T, 0, 0, 0) {
+            pub fn next(self: *Iter) ?Box(T) {
                 return self.list.pop();
             }
         };
@@ -370,7 +371,7 @@ pub fn ArrayList(comptime T: type) type {
         pub const RevIter = struct {
             list: *Self,
 
-            pub fn next(self: *RevIter) ?Box(T, 0, 0, 0) {
+            pub fn next(self: *RevIter) ?Box(T) {
                 return self.list.popFront();
             }
         };
@@ -383,9 +384,9 @@ test "ArrayList iterator" {
     var list = ArrayList(i32).init(std.testing.allocator);
     defer list.deinit();
 
-    try list.append(try Box(i32, 0, 0, 0).init(std.testing.allocator, 10));
-    try list.append(try Box(i32, 0, 0, 0).init(std.testing.allocator, 20));
-    try list.append(try Box(i32, 0, 0, 0).init(std.testing.allocator, 30));
+    try list.append(try Box(i32).init(std.testing.allocator, 10));
+    try list.append(try Box(i32).init(std.testing.allocator, 20));
+    try list.append(try Box(i32).init(std.testing.allocator, 30));
 
     var iter = list.iterator();
     const v1 = iter.next().?;
@@ -410,9 +411,9 @@ test "ArrayList rev iterator" {
     var list = ArrayList(i32).init(std.testing.allocator);
     defer list.deinit();
 
-    try list.append(try Box(i32, 0, 0, 0).init(std.testing.allocator, 10));
-    try list.append(try Box(i32, 0, 0, 0).init(std.testing.allocator, 20));
-    try list.append(try Box(i32, 0, 0, 0).init(std.testing.allocator, 30));
+    try list.append(try Box(i32).init(std.testing.allocator, 10));
+    try list.append(try Box(i32).init(std.testing.allocator, 20));
+    try list.append(try Box(i32).init(std.testing.allocator, 30));
 
     var iter = list.rev();
     const v1 = iter.next().?;
@@ -437,9 +438,9 @@ test "ArrayList sort" {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
 
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 30));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
+    try list.append(try Box(u32).init(std.testing.allocator, 30));
+    try list.append(try Box(u32).init(std.testing.allocator, 10));
+    try list.append(try Box(u32).init(std.testing.allocator, 20));
 
     list.sort({}, struct {
         fn f(_: void, a: *const u32, b: *const u32) bool {

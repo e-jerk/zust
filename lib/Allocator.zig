@@ -21,8 +21,8 @@ pub const ZustAllocator = struct {
     inner: std.mem.Allocator,
 
     /// Allocate a single T, returning an owned Box.
-    pub fn box(self: ZustAllocator, comptime T: type, value: T) !Box(T, 0, 0, 0) {
-        return try Box(T, 0, 0, 0).init(self.inner, value);
+    pub fn box(self: ZustAllocator, comptime T: type, value: T) !Box(T) {
+        return try Box(T).init(self.inner, value);
     }
 
     /// Allocate an Rc (single-threaded refcounted).
@@ -140,7 +140,7 @@ pub const TrackingAllocator = struct {
         };
     }
 
-    pub fn box(self: *TrackingAllocator, comptime T: type, value: T) !Box(T, 0, 0, 0) {
+    pub fn box(self: *TrackingAllocator, comptime T: type, value: T) !Box(T) {
         const b = try self.inner.box(T, value);
         self.active_boxes += 1;
         return b;

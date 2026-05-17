@@ -6,7 +6,9 @@ const Default = @import("Default.zig").Default;
 /// `state_tag`: 0=Owned, 1=BorrowedImm, 2=BorrowedMut, 3=Moved, 4=Freed
 /// `imm_count`: number of active immutable borrows
 /// `mut_count`: number of active mutable borrows (0 or 1)
-pub fn Box(comptime T: type, comptime state_tag: u32, comptime imm_count: u32, comptime mut_count: u32) type {
+///
+/// For the common case of an owned box, use `Box(T)` instead.
+pub fn BoxStateful(comptime T: type, comptime state_tag: u32, comptime imm_count: u32, comptime mut_count: u32) type {
     // Sanity-check state consistency at the type level.
     comptime {
         if (state_tag == 0) {
@@ -33,21 +35,21 @@ pub fn Box(comptime T: type, comptime state_tag: u32, comptime imm_count: u32, c
         // ─── Creation ───
 
         /// Allocate and wrap a value. Returns Box in Owned state.
-        pub fn init(allocator: std.mem.Allocator, value: T) !Box(T, 0, 0, 0) {
+        pub fn init(allocator: std.mem.Allocator, value: T) !BoxStateful(T, 0, 0, 0) {
             const ptr = try allocator.create(T);
             ptr.* = value;
             return .{ .ptr = ptr, .allocator = allocator };
         }
 
         /// Allocate and wrap the default value for `T`.
-        pub fn initDefault(allocator: std.mem.Allocator) !Box(T, 0, 0, 0) {
+        pub fn initDefault(allocator: std.mem.Allocator) !BoxStateful(T, 0, 0, 0) {
             return init(allocator, Default(T));
         }
 
         // ─── Immutable borrow ───
 
         /// Acquire an immutable borrow. Returns a Box in BorrowedImm state.
-        pub fn borrowImm(self: Self) Box(T, 1, imm_count + 1, mut_count) {
+        pub fn borrowImm(self: Self) BoxStateful(T, 1, imm_count + 1, mut_count) {
             comptime if (mut_count > 0)
                 @compileError("cannot borrow immutably: active mutable borrow exists");
             comptime if (state_tag == 3)
@@ -59,7 +61,7 @@ pub fn Box(comptime T: type, comptime state_tag: u32, comptime imm_count: u32, c
         }
 
         /// Release an immutable borrow. Returns a Box with decremented imm count.
-        pub fn releaseImm(self: Self) Box(T, if (imm_count == 1) 0 else 1, imm_count - 1, mut_count) {
+        pub fn releaseImm(self: Self) BoxStateful(T, if (imm_count == 1) 0 else 1, imm_count - 1, mut_count) {
             comptime if (state_tag != 1)
                 @compileError("cannot release immutable borrow: not in borrowed state");
             comptime if (imm_count == 0)
@@ -71,7 +73,7 @@ pub fn Box(comptime T: type, comptime state_tag: u32, comptime imm_count: u32, c
         // ─── Mutable borrow ───
 
         /// Acquire a mutable borrow. Returns a Box in BorrowedMut state.
-        pub fn borrowMut(self: Self) Box(T, 2, 0, 1) {
+        pub fn borrowMut(self: Self) BoxStateful(T, 2, 0, 1) {
             comptime if (imm_count > 0)
                 @compileError("cannot borrow mutably: active immutable borrows exist");
             comptime if (mut_count > 0)
@@ -83,7 +85,7 @@ pub fn Box(comptime T: type, comptime state_tag: u32, comptime imm_count: u32, c
         }
 
         /// Release a mutable borrow. Returns a Box in Owned state.
-        pub fn releaseMut(self: Self) Box(T, 0, 0, 0) {
+        pub fn releaseMut(self: Self) BoxStateful(T, 0, 0, 0) {
             comptime if (state_tag != 2)
                 @compileError("cannot release mutable borrow: not in mutable borrow state");
             comptime if (mut_count != 1)
@@ -96,7 +98,7 @@ pub fn Box(comptime T: type, comptime state_tag: u32, comptime imm_count: u32, c
 
         /// Destroy the owned value. Returns Box in Freed state.
         /// The caller must assign the result to capture the state transition.
-        pub fn deinit(self: Self) Box(T, 4, 0, 0) {
+        pub fn deinit(self: Self) BoxStateful(T, 4, 0, 0) {
             comptime if (state_tag == 4)
                 @compileError("double free detected");
             comptime if (state_tag != 0)
@@ -156,10 +158,16 @@ pub fn Box(comptime T: type, comptime state_tag: u32, comptime imm_count: u32, c
     };
 }
 
+/// Convenience alias for an owned Box(T, 0, 0, 0).
+/// This is the common case — use `Box(T)` for heap-allocated values.
+pub fn Box(comptime T: type) type {
+    return BoxStateful(T, 0, 0, 0);
+}
+
 // ─── Tests ───
 
 test "Box leak" {
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     const ptr = box.leak();
     try std.testing.expectEqual(ptr.*, 42);
     // In real usage the memory would be leaked; here we free manually
@@ -168,7 +176,7 @@ test "Box leak" {
 }
 
 test "Box initDefault" {
-    const box = try Box(u32, 0, 0, 0).initDefault(std.testing.allocator);
+    const box = try Box(u32).initDefault(std.testing.allocator);
     try std.testing.expectEqual(box.ptr.*, 0);
     const dead = box.deinit();
     _ = dead;

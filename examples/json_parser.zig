@@ -14,7 +14,7 @@
 const std = @import("std");
 const safe = @import("safe");
 
-const BoxValue = safe.Box(Value, 0, 0, 0);
+const BoxValue = safe.Box(Value);
 
 const ParseError = error{
     UnexpectedEof,

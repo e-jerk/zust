@@ -1,12 +1,13 @@
 const std = @import("std");
 const Box = @import("Box.zig").Box;
+const BoxStateful = @import("Box.zig").BoxStateful;
 
-/// A hash map that owns `Box(T, 0, 0, 0)` values keyed by strings.
+/// A hash map that owns `Box(T)` values keyed by strings.
 /// All values are stored in Owned state. Accessing a value borrows it
 /// from the map. The map tracks how many outstanding borrows exist.
 pub fn HashMap(comptime T: type) type {
     return struct {
-        map: std.StringHashMap(Box(T, 0, 0, 0)),
+        map: std.StringHashMap(Box(T)),
         allocator: std.mem.Allocator,
         outstanding_imm: u32 = 0,
         outstanding_mut: u32 = 0,
@@ -15,7 +16,7 @@ pub fn HashMap(comptime T: type) type {
 
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
-                .map = std.StringHashMap(Box(T, 0, 0, 0)).init(allocator),
+                .map = std.StringHashMap(Box(T)).init(allocator),
                 .allocator = allocator,
             };
         }
@@ -43,7 +44,7 @@ pub fn HashMap(comptime T: type) type {
             self.map.deinit();
         }
 
-        pub fn put(self: *Self, key: []const u8, box: Box(T, 0, 0, 0)) !void {
+        pub fn put(self: *Self, key: []const u8, box: Box(T)) !void {
             if (self.outstanding_mut > 0) {
                 @panic("cannot put while HashMap is mutably borrowed");
             }
@@ -62,7 +63,7 @@ pub fn HashMap(comptime T: type) type {
 
         /// Get a value by transferring ownership OUT of the map.
         /// Panics if the map has active borrows.
-        pub fn get(self: *Self, key: []const u8) ?Box(T, 0, 0, 0) {
+        pub fn get(self: *Self, key: []const u8) ?Box(T) {
             if (self.outstanding_imm > 0) {
                 @panic("cannot get while HashMap has active immutable borrows");
             }
@@ -80,7 +81,7 @@ pub fn HashMap(comptime T: type) type {
 
         /// Get a mutable reference to a value (borrows mutably from the map).
         pub fn getMut(self: *Self, key: []const u8) ?struct {
-            box: Box(T, 2, 0, 1),
+            box: BoxStateful(T, 2, 0, 1),
             map: *Self,
 
             const Borrow = @This();
@@ -103,7 +104,7 @@ pub fn HashMap(comptime T: type) type {
             };
         }
 
-        pub fn remove(self: *Self, key: []const u8) ?Box(T, 0, 0, 0) {
+        pub fn remove(self: *Self, key: []const u8) ?Box(T) {
             if (self.outstanding_imm > 0) {
                 @panic("cannot remove while HashMap has active immutable borrows");
             }
@@ -147,7 +148,7 @@ pub fn HashMap(comptime T: type) type {
         pub const DrainIter = struct {
             map: *Self,
 
-            pub fn next(self: *DrainIter) ?struct { key: []const u8, value: Box(T, 0, 0, 0) } {
+            pub fn next(self: *DrainIter) ?struct { key: []const u8, value: Box(T) } {
                 var iter = self.map.map.iterator();
                 const map_entry = iter.next() orelse return null;
                 const key = map_entry.key_ptr.*;
@@ -187,7 +188,7 @@ pub fn HashMap(comptime T: type) type {
         }
 
         pub fn borrowImm(self: *Self, key: []const u8) ?struct {
-            box: Box(T, 1, 1, 0),
+            box: BoxStateful(T, 1, 1, 0),
             map: *Self,
 
             const Borrow = @This();
@@ -208,7 +209,7 @@ pub fn HashMap(comptime T: type) type {
         }
 
         pub fn borrowMut(self: *Self, key: []const u8) ?struct {
-            box: Box(T, 2, 0, 1),
+            box: BoxStateful(T, 2, 0, 1),
             map: *Self,
 
             const Borrow = @This();
@@ -241,7 +242,7 @@ pub fn HashMap(comptime T: type) type {
         pub const Iter = struct {
             map: *Self,
 
-            pub fn next(self: *Iter) ?Box(T, 0, 0, 0) {
+            pub fn next(self: *Iter) ?Box(T) {
                 if (self.map.outstanding_imm > 0) {
                     @panic("cannot iterate while HashMap has active immutable borrows");
                 }
@@ -266,7 +267,7 @@ pub fn HashMap(comptime T: type) type {
         pub const RevIter = struct {
             inner: Iter,
 
-            pub fn next(self: *RevIter) ?Box(T, 0, 0, 0) {
+            pub fn next(self: *RevIter) ?Box(T) {
                 return self.inner.next();
             }
         };
@@ -281,7 +282,7 @@ pub fn HashMap(comptime T: type) type {
             };
         }
 
-        pub fn getOrPut(self: *Self, key: []const u8, box: Box(T, 0, 0, 0)) !*Box(T, 0, 0, 0) {
+        pub fn getOrPut(self: *Self, key: []const u8, box: Box(T)) !*Box(T) {
             return self.entry(key).orInsert(box);
         }
 
@@ -290,7 +291,7 @@ pub fn HashMap(comptime T: type) type {
             key: []const u8,
             occupied: bool,
 
-            pub fn orInsert(self_entry: Entry, box: Box(T, 0, 0, 0)) !*Box(T, 0, 0, 0) {
+            pub fn orInsert(self_entry: Entry, box: Box(T)) !*Box(T) {
                 if (self_entry.map.outstanding_mut > 0) {
                     @panic("cannot orInsert while HashMap is mutably borrowed");
                 }
@@ -312,7 +313,7 @@ pub fn HashMap(comptime T: type) type {
                 return result.value_ptr;
             }
 
-            pub fn orInsertWith(self_entry: Entry, context: anytype, comptime f: anytype) !*Box(T, 0, 0, 0) {
+            pub fn orInsertWith(self_entry: Entry, context: anytype, comptime f: anytype) !*Box(T) {
                 if (self_entry.map.outstanding_mut > 0) {
                     @panic("cannot orInsertWith while HashMap is mutably borrowed");
                 }
@@ -356,9 +357,9 @@ test "HashMap iterator" {
     var map = HashMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put("a", try Box(i32, 0, 0, 0).init(std.testing.allocator, 10));
-    try map.put("b", try Box(i32, 0, 0, 0).init(std.testing.allocator, 20));
-    try map.put("c", try Box(i32, 0, 0, 0).init(std.testing.allocator, 30));
+    try map.put("a", try Box(i32).init(std.testing.allocator, 10));
+    try map.put("b", try Box(i32).init(std.testing.allocator, 20));
+    try map.put("c", try Box(i32).init(std.testing.allocator, 30));
 
     try std.testing.expectEqual(@as(usize, 3), map.len());
 
@@ -379,8 +380,8 @@ test "HashMap rev iterator" {
     var map = HashMap(i32).init(std.testing.allocator);
     defer map.deinit();
 
-    try map.put("x", try Box(i32, 0, 0, 0).init(std.testing.allocator, 100));
-    try map.put("y", try Box(i32, 0, 0, 0).init(std.testing.allocator, 200));
+    try map.put("x", try Box(i32).init(std.testing.allocator, 100));
+    try map.put("y", try Box(i32).init(std.testing.allocator, 200));
 
     try std.testing.expectEqual(@as(usize, 2), map.len());
 

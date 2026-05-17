@@ -65,7 +65,7 @@ Replace these types **everywhere** in your codebase:
 | 3 | `std.AutoHashMap(K,V)` | `safe.HashMap(K, V)` | Generic over any key type |
 | 4 | `std.Thread.Mutex` | `safe.Mutex(T)` | Wraps a value; must `lock()` before access |
 | 5 | `std.Thread.RwLock` | `safe.RwLock(T)` | Writer-preference semantics |
-| 6 | `allocator.create(T)` | `safe.Box(T,0,0,0).init(allocator, default)` | State tag `(0,0,0)` = fresh |
+| 6 | `allocator.create(T)` | `safe.Box(T).init(allocator, default)` | State tag `(0,0,0)` = fresh |
 | 7 | `allocator.destroy(ptr)` | `defer _ = ptr.deinit()` | `.deinit()` returns dead state, must capture |
 | 8 | `var x: i32;` (uninit) | `var x = safe.CheckedInt(i32).init(0);` | Or initialize to a real default |
 | 9 | `opt.?` | `if (opt) \|v\| v else return error.Null` | Always check null; no `.?` |
@@ -148,7 +148,7 @@ Go through the [Type Mapping Cheat Sheet](#section-2-type-mapping-cheat-sheet) t
 Search-and-replace order matters:
 1. `std.ArrayList(` → `safe.ArrayList(`
 2. `std.StringHashMap(` → `safe.HashMap(safe.String, `
-3. `allocator.create(` → `safe.Box(T,0,0,0).init(allocator, `
+3. `allocator.create(` → `safe.Box(T).init(allocator, `
 4. `allocator.destroy(` → `_ = .deinit()` (manual review needed)
 5. `opt.?` → `if (opt) |v| v else ...`
 
@@ -174,7 +174,7 @@ defer allocator.destroy(box);
 
 **After:**
 ```zig
-var box = try safe.Box(u32, 0, 0, 0).init(allocator, 0);
+var box = try safe.Box(u32).init(allocator, 0);
 const dead = box.deinit();
 _ = dead;
 ```
@@ -356,15 +356,15 @@ Each `Box` state transition produces a different type, so arrays of `Box` are ha
 
 **Wrong:**
 ```zig
-var boxes: [3]safe.Box(u32, 0, 0, 0) = ...;
+var boxes: [3]safe.Box(u32) = ...;
 // Can't change state of one element independently
 ```
 
 **Right:**
 ```zig
 var list = safe.ArrayList(u32).init(allocator);
-try list.append(allocator, try safe.Box(u32, 0, 0, 0).init(allocator, 1));
-try list.append(allocator, try safe.Box(u32, 0, 0, 0).init(allocator, 2));
+try list.append(allocator, try safe.Box(u32).init(allocator, 1));
+try list.append(allocator, try safe.Box(u32).init(allocator, 2));
 ```
 
 ---
@@ -380,7 +380,7 @@ const String = safe.String;
 const Mutex = safe.Mutex;
 
 // Ownership
-var box = try Box(u32, 0, 0, 0).init(allocator, 42);
+var box = try Box(u32).init(allocator, 42);
 const b1 = box.borrowImm();
 const box_back = b1.releaseImm();
 const dead = box_back.deinit();
@@ -389,7 +389,7 @@ _ = dead;
 // Collections
 var list = ArrayList(u32).init(allocator);
 defer list.deinit(allocator);
-try list.append(allocator, try Box(u32, 0, 0, 0).init(allocator, 10));
+try list.append(allocator, try Box(u32).init(allocator, 10));
 
 // String
 var s = String.init(allocator);

@@ -1,15 +1,16 @@
 const std = @import("std");
 const Box = @import("Box.zig").Box;
+const BoxStateful = @import("Box.zig").BoxStateful;
 const SimdUtils = @import("SimdUtils.zig");
 
 /// A double-ended queue implemented with a growable ring buffer.
 /// Similar to Rust's `std::collections::VecDeque<T>`.
 ///
 /// O(1) push/pop at both ends.
-/// Stores Box(T, 0, 0, 0) values.
+/// Stores Box(T) values.
 pub fn VecDeque(comptime T: type) type {
     return struct {
-        buffer: []Box(T, 0, 0, 0),
+        buffer: []Box(T),
         head: usize,
         len: usize,
         allocator: std.mem.Allocator,
@@ -18,7 +19,7 @@ pub fn VecDeque(comptime T: type) type {
         const initial_capacity = 4;
 
         pub fn init(allocator: std.mem.Allocator) !Self {
-            const buf = try allocator.alloc(Box(T, 0, 0, 0), initial_capacity);
+            const buf = try allocator.alloc(Box(T), initial_capacity);
             @memset(buf, undefined);
             return .{
                 .buffer = buf,
@@ -58,11 +59,11 @@ pub fn VecDeque(comptime T: type) type {
 
         fn grow(self: *Self) !void {
             const new_cap = self.buffer.len * 2;
-            const new_buf = try self.allocator.alloc(Box(T, 0, 0, 0), new_cap);
+            const new_buf = try self.allocator.alloc(Box(T), new_cap);
             @memset(new_buf, undefined);
 
             if (@sizeOf(T) == 1 and self.len >= 16 and self.head + self.len <= self.buffer.len) {
-                const byte_len = self.len * @sizeOf(Box(T, 0, 0, 0));
+                const byte_len = self.len * @sizeOf(Box(T));
                 const src = @as([*]const u8, @ptrCast(&self.buffer[self.head]))[0..byte_len];
                 const dst = @as([*]u8, @ptrCast(new_buf))[0..byte_len];
                 SimdUtils.copy(dst, src);
@@ -78,7 +79,7 @@ pub fn VecDeque(comptime T: type) type {
             self.head = 0;
         }
 
-        pub fn pushBack(self: *Self, box: Box(T, 0, 0, 0)) !void {
+        pub fn pushBack(self: *Self, box: Box(T)) !void {
             if (self.len == self.buffer.len) {
                 try self.grow();
             }
@@ -87,7 +88,7 @@ pub fn VecDeque(comptime T: type) type {
             self.len += 1;
         }
 
-        pub fn pushFront(self: *Self, box: Box(T, 0, 0, 0)) !void {
+        pub fn pushFront(self: *Self, box: Box(T)) !void {
             if (self.len == self.buffer.len) {
                 try self.grow();
             }
@@ -96,14 +97,14 @@ pub fn VecDeque(comptime T: type) type {
             self.len += 1;
         }
 
-        pub fn popBack(self: *Self) ?Box(T, 0, 0, 0) {
+        pub fn popBack(self: *Self) ?Box(T) {
             if (self.len == 0) return null;
             self.len -= 1;
             const idx = self.wrap(self.head + self.len);
             return self.buffer[idx];
         }
 
-        pub fn popFront(self: *Self) ?Box(T, 0, 0, 0) {
+        pub fn popFront(self: *Self) ?Box(T) {
             if (self.len == 0) return null;
             const idx = self.head;
             self.head = self.wrap(self.head + 1);
@@ -111,13 +112,13 @@ pub fn VecDeque(comptime T: type) type {
             return self.buffer[idx];
         }
 
-        pub fn get(self: *const Self, index: usize) ?Box(T, 0, 0, 0) {
+        pub fn get(self: *const Self, index: usize) ?Box(T) {
             if (index >= self.len) return null;
             return self.buffer[self.wrap(self.head + index)];
         }
 
         pub fn getMut(self: *Self, index: usize) ?struct {
-            box: Box(T, 2, 0, 1),
+            box: BoxStateful(T, 2, 0, 1),
             deque: *Self,
             index: usize,
 
@@ -136,11 +137,11 @@ pub fn VecDeque(comptime T: type) type {
             };
         }
 
-        pub fn front(self: *Self) ?Box(T, 0, 0, 0) {
+        pub fn front(self: *Self) ?Box(T) {
             return self.get(0);
         }
 
-        pub fn back(self: *Self) ?Box(T, 0, 0, 0) {
+        pub fn back(self: *Self) ?Box(T) {
             if (self.len == 0) return null;
             return self.get(self.len - 1);
         }
@@ -187,12 +188,12 @@ pub fn VecDeque(comptime T: type) type {
             self.len = write_idx;
         }
 
-        pub fn resize(self: *Self, new_len: usize, default: Box(T, 0, 0, 0)) !void {
+        pub fn resize(self: *Self, new_len: usize, default: Box(T)) !void {
             if (new_len > self.len) {
                 const n = new_len - self.len;
                 var i: usize = 0;
                 while (i < n) : (i += 1) {
-                    const new_box = try Box(T, 0, 0, 0).init(self.allocator, default.ptr.*);
+                    const new_box = try Box(T).init(self.allocator, default.ptr.*);
                     try self.pushBack(new_box);
                 }
                 const dead = default.deinit();
@@ -221,15 +222,15 @@ pub fn VecDeque(comptime T: type) type {
         /// Realign the ring buffer so elements are contiguous starting at index 0.
         /// Returns a mutable slice of all elements.
         /// Similar to Rust's `VecDeque::make_contiguous`.
-        pub fn makeContiguous(self: *Self) ![]Box(T, 0, 0, 0) {
+        pub fn makeContiguous(self: *Self) ![]Box(T) {
             if (self.head == 0) return self.buffer[0..self.len];
 
             // Need to reallocate and copy in order
-            const new_buf = try self.allocator.alloc(Box(T, 0, 0, 0), self.buffer.len);
+            const new_buf = try self.allocator.alloc(Box(T), self.buffer.len);
             @memset(new_buf, undefined);
 
             if (@sizeOf(T) == 1 and self.len >= 16 and self.head + self.len <= self.buffer.len) {
-                const byte_len = self.len * @sizeOf(Box(T, 0, 0, 0));
+                const byte_len = self.len * @sizeOf(Box(T));
                 const src = @as([*]const u8, @ptrCast(&self.buffer[self.head]))[0..byte_len];
                 const dst = @as([*]u8, @ptrCast(new_buf))[0..byte_len];
                 SimdUtils.copy(dst, src);
@@ -256,7 +257,7 @@ pub fn VecDeque(comptime T: type) type {
         pub const Iter = struct {
             dq: *Self,
 
-            pub fn next(self: *Iter) ?Box(T, 0, 0, 0) {
+            pub fn next(self: *Iter) ?Box(T) {
                 return self.dq.popFront();
             }
         };
@@ -271,7 +272,7 @@ pub fn VecDeque(comptime T: type) type {
         pub const RevIter = struct {
             dq: *Self,
 
-            pub fn next(self: *RevIter) ?Box(T, 0, 0, 0) {
+            pub fn next(self: *RevIter) ?Box(T) {
                 return self.dq.popBack();
             }
         };
@@ -284,9 +285,9 @@ test "VecDeque iterator" {
     var dq = try VecDeque(i32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushBack(try Box(i32, 0, 0, 0).init(std.testing.allocator, 10));
-    try dq.pushBack(try Box(i32, 0, 0, 0).init(std.testing.allocator, 20));
-    try dq.pushBack(try Box(i32, 0, 0, 0).init(std.testing.allocator, 30));
+    try dq.pushBack(try Box(i32).init(std.testing.allocator, 10));
+    try dq.pushBack(try Box(i32).init(std.testing.allocator, 20));
+    try dq.pushBack(try Box(i32).init(std.testing.allocator, 30));
 
     var iter = dq.iterator();
     const v1 = iter.next().?;
@@ -311,9 +312,9 @@ test "VecDeque rev iterator" {
     var dq = try VecDeque(i32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushBack(try Box(i32, 0, 0, 0).init(std.testing.allocator, 10));
-    try dq.pushBack(try Box(i32, 0, 0, 0).init(std.testing.allocator, 20));
-    try dq.pushBack(try Box(i32, 0, 0, 0).init(std.testing.allocator, 30));
+    try dq.pushBack(try Box(i32).init(std.testing.allocator, 10));
+    try dq.pushBack(try Box(i32).init(std.testing.allocator, 20));
+    try dq.pushBack(try Box(i32).init(std.testing.allocator, 30));
 
     var iter = dq.rev();
     const v1 = iter.next().?;
@@ -338,9 +339,9 @@ test "VecDeque makeContiguous" {
     var dq = try VecDeque(u32).init(std.testing.allocator);
     defer dq.deinit();
 
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 10));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 20));
-    try dq.pushBack(try Box(u32, 0, 0, 0).init(std.testing.allocator, 30));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 10));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 20));
+    try dq.pushBack(try Box(u32).init(std.testing.allocator, 30));
 
     // Rotate to force non-contiguous layout
     dq.rotateLeft(1);

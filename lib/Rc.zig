@@ -60,13 +60,13 @@ pub fn Rc(comptime T: type) type {
 
         /// Consume the Rc and return the inner value as a Box if this is the only reference.
         /// Returns null if there are other references.
-        pub fn tryUnwrap(self: Self) ?Box(T, 0, 0, 0) {
+        pub fn tryUnwrap(self: Self) ?Box(T) {
             if (self.refcount.* == 1) {
                 const ptr = self.allocator.create(T) catch return null;
                 ptr.* = self.ptr.*;
                 self.allocator.destroy(self.ptr);
                 self.allocator.destroy(self.refcount);
-                return Box(T, 0, 0, 0){ .ptr = ptr, .allocator = self.allocator };
+                return Box(T){ .ptr = ptr, .allocator = self.allocator };
             }
             return null;
         }

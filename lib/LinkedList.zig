@@ -8,10 +8,10 @@ pub fn LinkedList(comptime T: type) type {
     return struct {
         const Node = struct {
             value: T,
-            next: ?Box(Node, 0, 0, 0) = null,
+            next: ?Box(Node) = null,
         };
 
-        head: ?Box(Node, 0, 0, 0) = null,
+        head: ?Box(Node) = null,
         allocator: std.mem.Allocator,
 
         const Self = @This();
@@ -23,7 +23,7 @@ pub fn LinkedList(comptime T: type) type {
         /// Push a value onto the front of the list.
         /// The new node takes ownership of the current head as its `next`.
         pub fn push(self: *Self, value: T) !void {
-            const new_node = try Box(Node, 0, 0, 0).init(self.allocator, .{
+            const new_node = try Box(Node).init(self.allocator, .{
                 .value = value,
                 .next = self.head,
             });
@@ -124,7 +124,7 @@ pub fn LinkedList(comptime T: type) type {
         }
 
         pub fn reverse(self: *Self) void {
-            var prev: ?Box(Node, 0, 0, 0) = null;
+            var prev: ?Box(Node) = null;
             var current = self.head;
 
             while (current) |box| {

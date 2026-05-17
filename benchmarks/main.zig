@@ -32,7 +32,7 @@ inline fn mix(acc: u64, v: u64, i: u64) u64 {
 fn benchBox(allocator: std.mem.Allocator) !void {
     var acc: u64 = 0;
     for (0..1_000_000) |i| {
-        const box = try safe.Box(i32, 0, 0, 0).init(allocator, @intCast(i));
+        const box = try safe.Box(i32).init(allocator, @intCast(i));
         acc = mix(acc, @intCast(box.ptr.*), i);
         const dead = box.deinit();
         _ = dead;
@@ -58,7 +58,7 @@ fn benchSafeArrayList(allocator: std.mem.Allocator) !void {
     defer list.deinit();
     var acc: u64 = 0;
     for (0..1_000_000) |i| {
-        const box = try safe.Box(i32, 0, 0, 0).init(allocator, @intCast(i));
+        const box = try safe.Box(i32).init(allocator, @intCast(i));
         try list.append(box);
     }
     for (0..1_000_000) |i| {
@@ -95,7 +95,7 @@ fn benchSafeHashMap(allocator: std.mem.Allocator) !void {
     for (0..100_000) |i| {
         var key_buf: [32]u8 = undefined;
         const key = try std.fmt.bufPrint(&key_buf, "key_{d}", .{i});
-        const box = try safe.Box(i32, 0, 0, 0).init(allocator, @intCast(i));
+        const box = try safe.Box(i32).init(allocator, @intCast(i));
         try map.put(key, box);
     }
     for (0..100_000) |i| {
@@ -313,7 +313,7 @@ fn benchVecDequeStack(allocator: std.mem.Allocator) !void {
     defer dq.deinit();
     var acc: u64 = 0;
     for (0..1_000_000) |i| {
-        const box = try safe.Box(i32, 0, 0, 0).init(allocator, @intCast(i));
+        const box = try safe.Box(i32).init(allocator, @intCast(i));
         try dq.pushBack(box);
     }
     for (0..1_000_000) |i| {
@@ -348,7 +348,7 @@ fn benchVecDequeQueue(allocator: std.mem.Allocator) !void {
     defer dq.deinit();
     var acc: u64 = 0;
     for (0..1_000_000) |i| {
-        const box = try safe.Box(i32, 0, 0, 0).init(allocator, @intCast(i));
+        const box = try safe.Box(i32).init(allocator, @intCast(i));
         try dq.pushBack(box);
     }
     for (0..1_000_000) |i| {

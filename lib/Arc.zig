@@ -96,13 +96,13 @@ pub fn Arc(comptime T: type) type {
 
         /// Consume the Arc and return the inner value as a Box if this is the only strong reference.
         /// Returns null if there are other strong references.
-        pub fn tryUnwrap(self: Self) ?Box(T, 0, 0, 0) {
+        pub fn tryUnwrap(self: Self) ?Box(T) {
             if (self.inner.strong.load(.seq_cst) == 1 and self.inner.weak.load(.seq_cst) == 1) {
                 const allocator = self.inner.allocator;
                 const ptr = allocator.create(T) catch return null;
                 ptr.* = self.inner.value;
                 allocator.destroy(self.inner);
-                return Box(T, 0, 0, 0){ .ptr = ptr, .allocator = allocator };
+                return Box(T){ .ptr = ptr, .allocator = allocator };
             }
             return null;
         }

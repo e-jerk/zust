@@ -64,11 +64,11 @@ git add build.zig
 **Step 1: Write Box.zig**
 
 Implement `Box(T, state_tag, imm_count, mut_count)` with:
-- `init` → `Box(T, 0, 0, 0)`
+- `init` → `Box(T)`
 - `borrowImm` → checks state, returns `Box(T, 1, imm+1, mut)`
 - `borrowMut` → checks state, returns `Box(T, 2, 0, 1)`
 - `releaseImm` → returns `Box(T, if (imm==1) 0 else 1, imm-1, mut)`
-- `releaseMut` → returns `Box(T, 0, 0, 0)`
+- `releaseMut` → returns `Box(T)`
 - `move` → returns `Box(T, 3, 0, 0)`
 - `deinit` → checks state, destroys pointer
 
@@ -78,7 +78,7 @@ Re-export `Box`.
 
 **Step 3: Write first test**
 
-Test that `Box(u32, 0, 0, 0).init` compiles and creates a valid box.
+Test that `Box(u32).init` compiles and creates a valid box.
 
 **Step 4: Run test**
 
@@ -143,7 +143,7 @@ Use `zig test` and confirm each test fails with the expected error message.
 
 **Step 1: Implement LinkedList using Box**
 
-Nodes contain `Box(Node, 0, 0, 0)` for `next` pointer.
+Nodes contain `Box(Node)` for `next` pointer.
 
 **Step 2: Test push/pop/deinit**
 

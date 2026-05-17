@@ -32,7 +32,7 @@ Replace unsafe types:
 | `std.ArrayList(T)` | `safe.ArrayList(T)` |
 | `std.StringHashMap(T)` | `safe.HashMap(safe.String, T)` |
 | `std.Thread.Mutex` | `safe.Mutex(T)` |
-| `allocator.create(T)` | `safe.Box(T,0,0,0).init(allocator, default)` |
+| `allocator.create(T)` | `safe.Box(T).init(allocator, default)` |
 | `allocator.destroy(ptr)` | `defer _ = ptr.deinit()` |
 | `var x: i32;` (uninit) | `var x = safe.CheckedInt(i32).init(0);` |
 | `opt.?` | `if (opt) \|v\| v else return error.Null` |
@@ -95,7 +95,7 @@ const safe = @import("safe");
 const Box = safe.Box;
 
 // Create an owned value
-const box = try Box(u32, 0, 0, 0).init(allocator, 42);
+const box = try Box(u32).init(allocator, 42);
 
 // Immutable borrow
 const b1 = box.borrowImm();
@@ -111,7 +111,7 @@ _ = dead;
 ### Closure API
 
 ```zig
-const box = try Box(u32, 0, 0, 0).init(allocator, 42);
+const box = try Box(u32).init(allocator, 42);
 var sum: u32 = 0;
 box.withImm(&sum, struct {
     fn f(ctx: *u32, val: *const u32) void {
@@ -154,7 +154,7 @@ drop(b);
 
 ```zig
 // zust
-const b = try Box(u32, 0, 0, 0).init(allocator, 42);
+const b = try Box(u32).init(allocator, 42);
 const dead = b.deinit();
 _ = dead;
 ```
@@ -334,7 +334,7 @@ let pin = Box::pin(42);
 
 ```zig
 // zust
-var pin = try Pin(u32).init(try Box(u32, 0, 0, 0).init(allocator, 42));
+var pin = try Pin(u32).init(try Box(u32).init(allocator, 42));
 pin.getMut().* = 100;
 const dead = pin.deinit();
 _ = dead;
@@ -400,8 +400,8 @@ v.push(20);
 // zust
 var list = ArrayList(u32).init(allocator);
 defer list.deinit();
-try list.append(try Box(u32, 0, 0, 0).init(allocator, 10));
-try list.append(try Box(u32, 0, 0, 0).init(allocator, 20));
+try list.append(try Box(u32).init(allocator, 10));
+try list.append(try Box(u32).init(allocator, 20));
 ```
 
 #### `VecDeque<T>` → `VecDeque(T)`
@@ -417,8 +417,8 @@ dq.push_front(5);
 // zust
 var dq = try VecDeque(u32).init(allocator);
 defer dq.deinit();
-try dq.pushBack(try Box(u32, 0, 0, 0).init(allocator, 10));
-try dq.pushFront(try Box(u32, 0, 0, 0).init(allocator, 5));
+try dq.pushBack(try Box(u32).init(allocator, 10));
+try dq.pushFront(try Box(u32).init(allocator, 5));
 ```
 
 #### `LinkedList<T>` → `LinkedList(T)`
@@ -448,7 +448,7 @@ map.insert("key", 42);
 // zust
 var map = HashMap(u32).init(allocator);
 defer map.deinit();
-try map.put("key", try Box(u32, 0, 0, 0).init(allocator, 42));
+try map.put("key", try Box(u32).init(allocator, 42));
 ```
 
 #### `BTreeMap<K,V>` → `BTreeMap(T)`
@@ -463,7 +463,7 @@ map.insert(1, 42);
 // zust
 var map = BTreeMap(u32).init(allocator);
 defer map.deinit();
-try map.put(1, try Box(u32, 0, 0, 0).init(allocator, 42));
+try map.put(1, try Box(u32).init(allocator, 42));
 ```
 
 #### `HashSet<T>` → `HashSet(T)`
@@ -495,7 +495,7 @@ let max = heap.pop().unwrap();
 var heap = try BinaryHeap(u32).init(allocator, struct {
     fn cmp(_: void, a: *const u32, b: *const u32) bool { return a.* > b.*; }
 }.cmp);
-try heap.push(try Box(u32, 0, 0, 0).init(allocator, 42));
+try heap.push(try Box(u32).init(allocator, 42));
 const max = heap.pop().?;
 ```
 
@@ -560,7 +560,7 @@ s.release();
 ```zig
 // zust
 {
-    const box = try Box(u32, 0, 0, 0).init(allocator, 42);
+    const box = try Box(u32).init(allocator, 42);
     const borrowed = ScopeImm(u32).borrow(box);
     _ = borrowed.scope.release();
     const dead = box.deinit();
@@ -956,8 +956,8 @@ fn bad_iterator() void {
 fn safe_iterator() void {
     var list = ArrayList(u32).init(std.testing.allocator);
     defer list.deinit();
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 1));
-    try list.append(try Box(u32, 0, 0, 0).init(std.testing.allocator, 2));
+    try list.append(try Box(u32).init(std.testing.allocator, 1));
+    try list.append(try Box(u32).init(std.testing.allocator, 2));
 
     var it = list.iterator();
     const first = it.next(); // ✅ Pops from list, takes ownership
@@ -1022,7 +1022,7 @@ fn bad_double_free() void {
 ```zig
 // WITH zust: Compile-time prevention
 fn safe_with_box() void {
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     const dead = box.deinit();
     // const dead2 = dead.deinit(); // ❌ @compileError: "double free detected"
     _ = dead;
@@ -1044,7 +1044,7 @@ fn bad_uaf() void {
 ```zig
 // WITH zust: Compile-time prevention
 fn safe_no_uaf() void {
-    const box = try Box(u32, 0, 0, 0).init(std.testing.allocator, 42);
+    const box = try Box(u32).init(std.testing.allocator, 42);
     const dead = box.deinit();
     // dead.ptr.* = 100; // ❌ @compileError: use of moved value
     _ = dead;
@@ -1240,7 +1240,7 @@ fn bad_move() void {
 ```zig
 // WITH zust: Pin prevents moving
 fn safe_pin() void {
-    const box = try Box(SelfRef, 0, 0, 0).init(std.testing.allocator, undefined);
+    const box = try Box(SelfRef).init(std.testing.allocator, undefined);
     var pin = Pin(SelfRef).init(box); // Pinned on heap
     pin.getMut().ptr = &pin.getMut().data;
     // var moved = pin; // ❌ Analyzer: "Pin value moved"
@@ -1271,7 +1271,7 @@ fn bad_iter() void {
 fn safe_hashmap() void {
     var map = HashMap(u32).init(std.testing.allocator);
     defer map.deinit();
-    try map.put("a", try Box(u32, 0, 0, 0).init(std.testing.allocator, 1));
+    try map.put("a", try Box(u32).init(std.testing.allocator, 1));
     var entry = map.get("a"); // ✅ Ownership transfer: removed from map
     if (entry) |box| {
         const dead = box.deinit(); // ✅ Properly freed
@@ -1406,7 +1406,7 @@ fn safe_slice() void {
 | Use-after-free | ✅ Error | `raw.* = 100` after `box.deinit()` |
 | Pointer escape | ✅ Error | `global_ptr = box.unsafePtr()` then `box.deinit()` |
 | Dangling argument | ✅ Error | Passing raw pointer to function after deallocation |
-| Raw allocation | ✅ Warning | `allocator.create(T)` → suggest `Box(T,0,0,0).init()` |
+| Raw allocation | ✅ Warning | `allocator.create(T)` → suggest `Box(T).init()` |
 | Raw deallocation | ✅ Warning | `allocator.destroy(ptr)` → suggest `Box.deinit()` |
 | Raw pointer types | ✅ Warning | `fn foo() *u32` → suggest returning `Box` |
 | Raw pointer deref | ✅ Warning | `ptr.* = 42` → suggest `.withImm()`/`.withMut()` |
@@ -1422,7 +1422,7 @@ raw.* = 42;
 allocator.destroy(raw);
 
 // And suggest:
-var box = try Box(u32, 0, 0, 0).init(allocator, 42);
+var box = try Box(u32).init(allocator, 42);
 box.withImm({}, struct { fn f(_: void, val: *const u32) void {
     // use val
 }}.f);
@@ -1608,11 +1608,11 @@ The analyzer eats its own dog food:
    - The list uses `borrowImm`/`borrowMut` for traversal
 
 2. **Analyzer manages AST lifecycle with `safe.Box`**
-   - Parsed `std.zig.Ast` lives in a `Box(std.zig.Ast, 0, 0, 0)`
+   - Parsed `std.zig.Ast` lives in a `Box(std.zig.Ast)`
    - Explicit `.deinit()` ensures single-owner cleanup
 
 3. **LSP Server uses `safe.Box` for the analyzer**
-   - `analyzer: Box(Analysis.Analyzer, 0, 0, 0)`
+   - `analyzer: Box(Analysis.Analyzer)`
    - `unsafePtr()` to borrow and call methods
    - Explicit deinit order in `Server.deinit()`
 
@@ -1729,7 +1729,7 @@ zig build transpile
 **Patterns rewritten:**
 | Unsafe Pattern | Safe Replacement |
 |----------------|------------------|
-| `allocator.create(T)` | `safe.Box(T, 0, 0, 0).init(allocator, undefined)` |
+| `allocator.create(T)` | `safe.Box(T).init(allocator, undefined)` |
 | `allocator.destroy(ptr)` | `defer _ = ptr.deinit()` |
 | `std.ArrayList(T)` | `safe.ArrayList(T)` |
 | `std.StringHashMap(T)` | `safe.HashMap(safe.String, T)` |
@@ -1778,7 +1778,7 @@ Load it with: `Skill("zust-transpile")`
 These cannot be solved at the library level and require changes to Zig itself:
 
 - **Non-lexical lifetimes (NLL)**: Borrows that end before scope exit are not tracked. The library uses lexical scopes (`ScopeImm`/`ScopeMut`) as a conservative approximation. Real NLL requires compiler integration.
-- **Type-level state homogeneity**: All `Box(T, 0, 0, 0)` instances share the same comptime state. Each state transition returns a *different type*, making homogeneous arrays of Boxes impossible without `ArrayList` or `VecDeque`.
+- **Type-level state homogeneity**: All `Box(T)` instances share the same comptime state. Each state transition returns a *different type*, making homogeneous arrays of Boxes impossible without `ArrayList` or `VecDeque`.
 - **Compile-time cost**: Complex borrow sequences cause heavy monomorphization. Build times increase with borrow depth.
 
 ### Library Limitations

@@ -24,7 +24,7 @@ const LinkedList = safe.LinkedList;
 pub const Server = struct {
     gpa: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
-    analyzer: Box(Analysis.Analyzer, 0, 0, 0),
+    analyzer: Box(Analysis.Analyzer),
     cache: Cache,
     documents: std.StringHashMap(Document),
     client_capabilities: ?std.json.Value,
@@ -41,7 +41,7 @@ pub const Server = struct {
         return .{
             .gpa = gpa,
             .arena = std.heap.ArenaAllocator.init(gpa),
-            .analyzer = try Box(Analysis.Analyzer, 0, 0, 0).init(gpa, Analysis.Analyzer.init(gpa)),
+            .analyzer = try Box(Analysis.Analyzer).init(gpa, Analysis.Analyzer.init(gpa)),
             .cache = Cache.init(gpa),
             .documents = std.StringHashMap(Document).init(gpa),
             .client_capabilities = null,

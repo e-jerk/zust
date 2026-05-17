@@ -27,7 +27,7 @@ fn assertIsCopy(comptime T: type) void {
 /// A borrow-checked slice that tracks its origin.
 ///
 /// Can be created from:
-/// - `Box(T, 0, 0, 0)` → borrows the Box immutably
+/// - `Box(T)` → borrows the Box immutably
 /// - `ArrayList(T)` → borrows the list immutably
 /// - `[N]T` (stack arrays) → no borrow needed
 ///
@@ -51,7 +51,7 @@ pub fn Slice(comptime T: type) type {
         };
 
         /// Borrow immutably from a Box containing a slice `[]T`.
-        pub fn fromBoxSlice(box: Box([]T, 0, 0, 0)) Self {
+        pub fn fromBoxSlice(box: Box([]T)) Self {
             return .{
                 .data = box.ptr.*,
                 .origin = .{ .Box = .{
