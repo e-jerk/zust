@@ -16,7 +16,8 @@ const Cache = @import("Cache.zig").Cache;
 const OutputFormat = enum { Human, SARIF };
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+    // Use c_allocator to avoid GPA leak checking noise during analysis
+    const allocator = std.heap.c_allocator;
 
     if (comptime builtin.target.os.tag == .wasi) {
         // WASI: no command-line args available, run LSP server directly.

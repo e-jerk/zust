@@ -99,17 +99,26 @@ pub const Transpiler = struct {
                 .@"defer" => {
                     try self.handleDefer(node);
                 },
+                .@"errdefer" => {
+                    try self.handleDefer(node);
+                },
                 .builtin_call => {
                     try self.handleBuiltinCall(node);
                 },
                 .builtin_call_two => {
                     try self.handleBuiltinCallTwo(node);
                 },
+                .deref => {
+                    try self.handleDeref(node);
+                },
                 .for_simple, .@"for" => {
                     try self.handleFor(node);
                 },
                 .while_simple, .while_cont, .@"while" => {
                     try self.handleWhile(node);
+                },
+                .fn_proto, .fn_proto_multi, .fn_proto_one, .fn_proto_simple => {
+                    try self.handleFnProto(node);
                 },
                 else => {},
             }
@@ -217,17 +226,31 @@ pub const Transpiler = struct {
         }
 
         // Pattern: std.mem.eql → safe.SimdUtils.eql
+        // std.mem.eql(u8, a, b) → safe.SimdUtils.eql(a, b)  (drop type arg)
         if (std.mem.eql(u8, fn_text, "std.mem.eql") or std.mem.eql(u8, fn_text, "mem.eql")) {
-            const call_span = ast.nodeToSpan(node);
-            const repl = try std.fmt.allocPrint(self._allocator, "safe.SimdUtils.eql", .{});
-            try self.addEdit(call_span.start, call_span.end, repl);
+            if (call.ast.params.len >= 3) {
+                const a_span = ast.nodeToSpan(call.ast.params[1]);
+                const b_span = ast.nodeToSpan(call.ast.params[2]);
+                const a_text = source[a_span.start..a_span.end];
+                const b_text = source[b_span.start..b_span.end];
+                const call_span = ast.nodeToSpan(node);
+                const repl = try std.fmt.allocPrint(self._allocator, "safe.SimdUtils.eql({s}, {s})", .{ a_text, b_text });
+                try self.addEdit(call_span.start, call_span.end, repl);
+            }
         }
 
         // Pattern: std.mem.copy → safe.SimdUtils.copy
+        // std.mem.copy(u8, dest, src) → safe.SimdUtils.copy(dest, src)  (drop type arg)
         if (std.mem.eql(u8, fn_text, "std.mem.copy") or std.mem.eql(u8, fn_text, "mem.copy")) {
-            const call_span = ast.nodeToSpan(node);
-            const repl = try std.fmt.allocPrint(self._allocator, "safe.SimdUtils.copy", .{});
-            try self.addEdit(call_span.start, call_span.end, repl);
+            if (call.ast.params.len >= 3) {
+                const dest_span = ast.nodeToSpan(call.ast.params[1]);
+                const src_span = ast.nodeToSpan(call.ast.params[2]);
+                const dest_text = source[dest_span.start..dest_span.end];
+                const src_text = source[src_span.start..src_span.end];
+                const call_span = ast.nodeToSpan(node);
+                const repl = try std.fmt.allocPrint(self._allocator, "safe.SimdUtils.copy({s}, {s})", .{ dest_text, src_text });
+                try self.addEdit(call_span.start, call_span.end, repl);
+            }
         }
 
         // Pattern: std.mem.indexOf → comment
@@ -292,6 +315,92 @@ pub const Transpiler = struct {
         }
     }
 
+    /// Handle dereference nodes: rewrite `ptr.* = value` to `ptr[0] = value`
+    fn handleDeref(self: *Self, node: std.zig.Ast.Node.Index) !void {
+        const ast = &self.ast.?;
+        const source = self.source.slice();
+        const data = ast.nodeData(node);
+        const inner = data.node;
+        if (ast.nodeTag(inner) == .identifier) {
+            const inner_span = ast.nodeToSpan(inner);
+            const inner_text = source[inner_span.start..inner_span.end];
+            const deref_span = ast.nodeToSpan(node);
+            // Verify the deref text is exactly `identifier.*`
+            if (deref_span.start == inner_span.start and
+                deref_span.end == inner_span.end + 2 and
+                std.mem.eql(u8, source[inner_span.end..deref_span.end], ".*"))
+            {
+                // Only rewrite if this is an assignment LHS
+                var pos = deref_span.end;
+                while (pos < source.len and std.ascii.isWhitespace(source[pos])) pos += 1;
+                if (pos < source.len and source[pos] == '=') {
+                    // Make sure it's not `==`
+                    var next_pos = pos + 1;
+                    while (next_pos < source.len and std.ascii.isWhitespace(source[next_pos])) next_pos += 1;
+                    if (next_pos >= source.len or source[next_pos] != '=') {
+                        const repl = try std.fmt.allocPrint(self._allocator, "{s}[0]", .{inner_text});
+                        try self.addEdit(deref_span.start, deref_span.end, repl);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle function prototypes (issues 7 and 8: raw slice parameters and returns)
+    fn handleFnProto(self: *Self, node: std.zig.Ast.Node.Index) !void {
+        const ast = &self.ast.?;
+        const source = self.source.slice();
+        const tag = ast.nodeTag(node);
+
+        var buffer: [1]std.zig.Ast.Node.Index = undefined;
+        const proto = switch (tag) {
+            .fn_proto => ast.fnProto(node),
+            .fn_proto_multi => ast.fnProtoMulti(node),
+            .fn_proto_one => ast.fnProtoOne(&buffer, node),
+            .fn_proto_simple => ast.fnProtoSimple(&buffer, node),
+            else => return,
+        };
+
+        var needs_param_comment = false;
+        var needs_return_comment = false;
+
+        // Check each parameter's type
+        for (proto.ast.params) |param_type| {
+            const type_span = ast.nodeToSpan(param_type);
+            const type_text = source[type_span.start..type_span.end];
+            if (std.mem.eql(u8, type_text, "[]const u8") or std.mem.eql(u8, type_text, "[]u8")) {
+                needs_param_comment = true;
+            }
+        }
+
+        // Check return type
+        if (proto.ast.return_type != .none) {
+            const return_node = proto.ast.return_type.unwrap().?;
+            const return_span = ast.nodeToSpan(return_node);
+            const return_text = source[return_span.start..return_span.end];
+            if (std.mem.eql(u8, return_text, "[]const u8") or std.mem.eql(u8, return_text, "[]u8")) {
+                needs_return_comment = true;
+            }
+        }
+
+        if (needs_param_comment or needs_return_comment) {
+            const span = ast.nodeToSpan(node);
+            var line_start = span.start;
+            while (line_start > 0 and source[line_start - 1] != '\n') {
+                line_start -= 1;
+            }
+
+            if (needs_param_comment) {
+                const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: function uses raw slice parameter — consider safe.String\n", .{});
+                try self.addEdit(line_start, line_start, repl);
+            }
+            if (needs_return_comment) {
+                const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: function returns small constant slice — consider safe.String\n", .{});
+                try self.addEdit(line_start, line_start, repl);
+            }
+        }
+    }
+
     /// Handle variable declarations (pattern 6: uninitialized var + slice types)
     fn handleVarDecl(self: *Self, node: std.zig.Ast.Node.Index) !void {
         const ast = &self.ast.?;
@@ -318,6 +427,22 @@ pub const Transpiler = struct {
                     const repl = try std.fmt.allocPrint(self._allocator, " = undefined", .{});
                     try self.addEdit(after_type, after_type, repl);
                 }
+            } else {
+                // Issue 1 & 9: Replace `= undefined` for arrays and C-structs
+                const init_node: std.zig.Ast.Node.Index = vd.ast.init_node.unwrap().?;
+                const init_span = ast.nodeToSpan(init_node);
+                const init_text = source[init_span.start..init_span.end];
+                if (std.mem.eql(u8, init_text, "undefined")) {
+                    if (type_text.len > 0 and type_text[0] == '[') {
+                        // Array type: replace undefined with .{}
+                        const repl = try std.fmt.allocPrint(self._allocator, ".{{}}", .{});
+                        try self.addEdit(init_span.start, init_span.end, repl);
+                    } else if (std.mem.indexOf(u8, type_text, ".") != null) {
+                        // Namespaced type like std.posix.Stat: use std.mem.zeroes
+                        const repl = try std.fmt.allocPrint(self._allocator, "std.mem.zeroes({s})", .{type_text});
+                        try self.addEdit(init_span.start, init_span.end, repl);
+                    }
+                }
             }
         }
 
@@ -341,12 +466,61 @@ pub const Transpiler = struct {
         }
     }
 
-    /// Handle for loops with index access (warning comment)
+    /// Handle for loops (issue 2: pointer capture, index access warning)
     fn handleFor(self: *Self, node: std.zig.Ast.Node.Index) !void {
         const ast = &self.ast.?;
+        const source = self.source.slice();
         const tag = ast.nodeTag(node);
-        if (tag == .@"for") {
-            const for_info = ast.forFull(node);
+
+        if (tag == .@"for" or tag == .for_simple) {
+            const for_info = if (tag == .@"for") ast.forFull(node) else ast.forSimple(node);
+
+            // Issue 2: pointer capture → index-based loop
+            if (for_info.ast.inputs.len == 1 and for_info.ast.else_expr == .none) {
+                const payload_token = for_info.payload_token;
+                if (ast.tokens.items(.tag)[payload_token] == .asterisk) {
+                    const capture_name = ast.tokenSlice(payload_token + 1);
+                    const input = for_info.ast.inputs[0];
+                    const input_span = ast.nodeToSpan(input);
+                    const input_text = source[input_span.start..input_span.end];
+
+                    // Compute full span of the for loop
+                    const first_tok = ast.firstToken(node);
+                    const last_tok = ast.lastToken(node);
+                    const start_pos = ast.tokens.items(.start)[first_tok];
+                    var end_pos = source.len;
+                    if (last_tok + 1 < ast.tokens.len) {
+                        end_pos = ast.tokens.items(.start)[last_tok + 1];
+                    }
+
+                    // Get body text
+                    const body_node = for_info.ast.then_expr;
+                    const body_first = ast.firstToken(body_node);
+                    const body_last = ast.lastToken(body_node);
+                    const body_start = ast.tokens.items(.start)[body_first];
+                    var body_end = source.len;
+                    if (body_last + 1 < ast.tokens.len) {
+                        body_end = ast.tokens.items(.start)[body_last + 1];
+                    }
+                    const body_text = source[body_start..body_end];
+
+                    const lbrace = std.mem.indexOfScalar(u8, body_text, '{');
+                    const repl = if (lbrace) |idx|
+                        try std.fmt.allocPrint(self._allocator,
+                            \\for (0..{s}.len) |__zust_i| {s}
+                            \\    var {s} = &{s}[__zust_i];{s}
+                        , .{ input_text, body_text[0..idx + 1], capture_name, input_text, body_text[idx + 1..] })
+                    else
+                        try std.fmt.allocPrint(self._allocator,
+                            \\for (0..{s}.len) |__zust_i| {{ var {s} = &{s}[__zust_i]; {s} }}
+                        , .{ input_text, capture_name, input_text, body_text });
+
+                    try self.addEdit(start_pos, end_pos, repl);
+                    return;
+                }
+            }
+
+            // Existing: for with index access warning
             if (for_info.ast.inputs.len >= 2) {
                 const span = ast.nodeToSpan(node);
                 const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: for with index access requires manual review\n    ", .{});
@@ -364,10 +538,14 @@ pub const Transpiler = struct {
         var cond_expr: std.zig.Ast.Node.Index = undefined;
         var body_expr: std.zig.Ast.Node.Index = undefined;
 
-        if (tag == .while_simple or tag == .while_cont) {
+        if (tag == .while_simple) {
             const data = ast.nodeData(node).node_and_node;
             cond_expr = data[0];
             body_expr = data[1];
+        } else if (tag == .while_cont) {
+            const while_info = ast.whileCont(node);
+            cond_expr = while_info.ast.cond_expr;
+            body_expr = while_info.ast.then_expr;
         } else if (tag == .@"while") {
             const while_info = ast.whileFull(node);
             cond_expr = while_info.ast.cond_expr;
@@ -413,6 +591,31 @@ pub const Transpiler = struct {
         const inner_span = ast.nodeToSpan(inner);
         const inner_text = source[inner_span.start..inner_span.end];
 
+        // Detect if unwrap is part of a larger expression chain (e.g., opt.?.method())
+        // or a return statement — in those cases we can't replace with a block.
+        var after_pos = span.end;
+        while (after_pos < source.len and std.ascii.isWhitespace(source[after_pos])) after_pos += 1;
+        const is_chained = after_pos < source.len and (source[after_pos] == '.' or source[after_pos] == '(');
+
+        // Also detect return context by looking backward for "return"
+        var before_pos = span.start;
+        while (before_pos > 0 and std.ascii.isWhitespace(source[before_pos - 1])) before_pos -= 1;
+        var is_return = false;
+        if (before_pos >= 7 and std.mem.eql(u8, source[before_pos - 7 .. before_pos], "return ")) {
+            is_return = true;
+        }
+
+        if (is_chained or is_return) {
+            // Just add a comment before the line instead of rewriting
+            var line_start = span.start;
+            while (line_start > 0 and source[line_start - 1] != '\n') {
+                line_start -= 1;
+            }
+            const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: optional unwrap requires manual review\n", .{});
+            try self.addEdit(line_start, line_start, repl);
+            return;
+        }
+
         const repl = try std.fmt.allocPrint(self._allocator,
             \\if ({s}) |value| {{
             \\    value
@@ -423,38 +626,80 @@ pub const Transpiler = struct {
         try self.addEdit(span.start, span.end, repl);
     }
 
-    /// Handle defer statements (pattern 1: allocator.destroy)
+    /// Handle defer statements (pattern 1: allocator.destroy, allocator.free)
     fn handleDefer(self: *Self, node: std.zig.Ast.Node.Index) !void {
         const ast = &self.ast.?;
         const source = self.source.slice();
-        const inner = ast.nodeData(node).node;
+        const tag = ast.nodeTag(node);
+        const inner: std.zig.Ast.Node.Index = if (tag == .@"errdefer")
+            ast.nodeData(node).opt_token_and_node[1]
+        else
+            ast.nodeData(node).node;
         const inner_tag = ast.nodeTag(inner);
 
+        // Helper to check if a call is destroy or free
+        const isDestroyOrFree = struct {
+            fn check(ast2: *const std.zig.Ast, call_node: std.zig.Ast.Node.Index, src: []const u8) struct { is_destroy: bool, is_free: bool, param: ?[]const u8 } {
+                var buf: [1]std.zig.Ast.Node.Index = undefined;
+                const call_info = switch (ast2.nodeTag(call_node)) {
+                    .call_one => ast2.callOne(&buf, call_node),
+                    .call => ast2.callFull(call_node),
+                    else => return .{ .is_destroy = false, .is_free = false, .param = null },
+                };
+                const fn_expr = call_info.ast.fn_expr;
+                const fn_span = ast2.nodeToSpan(fn_expr);
+                const fn_text = src[fn_span.start..fn_span.end];
+                if (call_info.ast.params.len == 1) {
+                    const param_span = ast2.nodeToSpan(call_info.ast.params[0]);
+                    const param_text = src[param_span.start..param_span.end];
+                    if (std.mem.eql(u8, fn_text, "destroy") or std.mem.endsWith(u8, fn_text, ".destroy")) {
+                        return .{ .is_destroy = true, .is_free = false, .param = param_text };
+                    }
+                    if (std.mem.eql(u8, fn_text, "free") or std.mem.endsWith(u8, fn_text, ".free")) {
+                        return .{ .is_destroy = false, .is_free = true, .param = param_text };
+                    }
+                }
+                return .{ .is_destroy = false, .is_free = false, .param = null };
+            }
+        }.check;
+
         if (inner_tag == .call_one or inner_tag == .call) {
-            var buffer: [1]std.zig.Ast.Node.Index = undefined;
-            const call = switch (inner_tag) {
-                .call_one => ast.callOne(&buffer, inner),
-                .call => ast.callFull(inner),
-                else => return,
+            const info = isDestroyOrFree(ast, inner, source);
+            const defer_span = ast.nodeToSpan(node);
+
+            if (info.is_destroy) {
+                const repl = try std.fmt.allocPrint(self._allocator, "defer _ = {s}.deinit()", .{info.param.?});
+                try self.addEdit(defer_span.start, defer_span.end, repl);
+                return;
+            }
+            if (info.is_free) {
+                // Remove entire defer/errdefer statement and replace with comment
+                const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: free removed (memory owned by safe type)", .{});
+                try self.addEdit(defer_span.start, defer_span.end, repl);
+                return;
+            }
+        }
+
+        // Handle defer if (cond) |capture| allocator.free(capture)
+        if (inner_tag == .@"if" or inner_tag == .if_simple) {
+            const if_info = switch (inner_tag) {
+                .@"if" => ast.ifFull(inner),
+                .if_simple => ast.ifSimple(inner),
+                else => unreachable,
             };
-
-            const fn_expr = call.ast.fn_expr;
-            const fn_span = ast.nodeToSpan(fn_expr);
-            const fn_text = source[fn_span.start..fn_span.end];
-
-            // Pattern 1: allocator.destroy(ptr)
-            if (std.mem.eql(u8, fn_text, "destroy") or std.mem.endsWith(u8, fn_text, ".destroy")) {
-                if (call.ast.params.len == 1) {
-                    const param_node = call.ast.params[0];
-                    const param_span = ast.nodeToSpan(param_node);
-                    const param_text = source[param_span.start..param_span.end];
-
-                    const defer_span = ast.nodeToSpan(node);
-                    const repl = try std.fmt.allocPrint(self._allocator, "defer _ = {s}.deinit()", .{param_text});
+            const then_expr = if_info.ast.then_expr;
+            const then_tag = ast.nodeTag(then_expr);
+            if (then_tag == .call_one or then_tag == .call) {
+                const info = isDestroyOrFree(ast, then_expr, source);
+                const defer_span = ast.nodeToSpan(node);
+                if (info.is_free) {
+                    const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: free removed (memory owned by safe type)", .{});
                     try self.addEdit(defer_span.start, defer_span.end, repl);
+                    return;
                 }
             }
         }
+
     }
 
     /// Handle builtin calls that need manual review comments
@@ -468,7 +713,8 @@ pub const Transpiler = struct {
         const unsafe_builtins = &[_][]const u8{ "@ptrCast", "@alignCast", "@intToPtr", "@ptrToInt", "@bitCast" };
         for (unsafe_builtins) |name| {
             if (std.mem.eql(u8, builtin_name, name)) {
-                const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: {s} requires manual review\n    {s}", .{ name, builtin_name });
+                const original = source[span.start..span.end];
+                const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: {s} requires manual review\n    {s}", .{ name, original });
                 try self.addEdit(span.start, span.end, repl);
                 break;
             }
@@ -493,10 +739,18 @@ pub const Transpiler = struct {
         const builtin_name = ast.tokenSlice(main_token);
         const span = ast.nodeToSpan(node);
 
-        // @memcpy(dest, src) → safe.SimdUtils.copy
+        // @memcpy(dest, src) → safe.SimdUtils.copy(dest, src)
         if (std.mem.eql(u8, builtin_name, "@memcpy")) {
-            const repl = try std.fmt.allocPrint(self._allocator, "safe.SimdUtils.copy", .{});
-            try self.addEdit(span.start, span.end, repl);
+            var buffer: [2]std.zig.Ast.Node.Index = undefined;
+            const args = ast.builtinCallParams(&buffer, node).?;
+            if (args.len >= 2) {
+                const dest_span = ast.nodeToSpan(args[0]);
+                const src_span = ast.nodeToSpan(args[1]);
+                const dest_text = source[dest_span.start..dest_span.end];
+                const src_text = source[src_span.start..src_span.end];
+                const repl = try std.fmt.allocPrint(self._allocator, "safe.SimdUtils.copy({s}, {s})", .{ dest_text, src_text });
+                try self.addEdit(span.start, span.end, repl);
+            }
             return;
         }
 
@@ -524,9 +778,17 @@ pub const Transpiler = struct {
             return;
         }
 
-        if (std.mem.eql(u8, builtin_name, "@bitCast")) {
-            const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: {s} requires manual review\n    {s}", .{ builtin_name, builtin_name });
-            try self.addEdit(span.start, span.end, repl);
+        const unsafe_builtins_two = &[_][]const u8{ "@ptrCast", "@alignCast", "@intToPtr", "@ptrToInt", "@bitCast" };
+        for (unsafe_builtins_two) |name| {
+            if (std.mem.eql(u8, builtin_name, name)) {
+                const original = source[span.start..span.end];
+                const repl = if (std.mem.eql(u8, builtin_name, "@ptrCast"))
+                    try std.fmt.allocPrint(self._allocator, "// safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed\n    {s}", .{original})
+                else
+                    try std.fmt.allocPrint(self._allocator, "// safe-transpile: {s} requires manual review\n    {s}", .{ name, original });
+                try self.addEdit(span.start, span.end, repl);
+                break;
+            }
         }
     }
 
@@ -1046,6 +1308,223 @@ test "pattern: std.debug.print with pointer gets redacted" {
     defer allocator.free(output);
 
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "zust: never print raw pointer addresses"));
+}
+
+// ─── Transpiler Bug-Fix Tests (Issue Tracker) ───
+
+test "issue 1: array zero-initialization replaces undefined with empty init" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    var buf: [256]u8 = undefined;
+        \\    _ = buf;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should NOT contain "= undefined" for array types
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "[256]u8 = undefined"));
+    // Should contain empty initialization or zeroes
+    try std.testing.expect(
+        std.mem.containsAtLeast(u8, output, 1, "[256]u8 = .{}") or
+            std.mem.containsAtLeast(u8, output, 1, "std.mem.zeroes([256]u8)"),
+    );
+}
+
+test "issue 2: for loop with pointer capture rewritten to index-based" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    var items = [_]u8{1, 2, 3};
+        \\    for (items) |*c| {
+        \\        c.* = 0;
+        \\    }
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should NOT contain the raw pointer capture pattern
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "for (items) |*c|"));
+    // Should contain an index-based loop
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "for (0..items.len)"));
+}
+
+test "issue 3: scalar single-item pointer dereference rewritten to array index" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn setTrue(found_match: *bool) void {
+        \\    found_match.* = true;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should NOT contain raw dereference on *bool
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "found_match.* = true"));
+    // Should use array indexing syntax
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "found_match[0] = true"));
+}
+
+test "issue 4: defer destroy only rewritten for safe.Box-created pointers" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\const std = @import("std");
+        \\const safe = @import("safe");
+        \\fn foo(allocator: std.mem.Allocator) !void {
+        \\    var ptr = try allocator.create(i32);
+        \\    defer allocator.destroy(ptr);
+        \\    ptr.* = 42;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // create() → safe.Box, so destroy should be rewritten to deinit
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.Box(i32).init"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "defer _ = ptr.deinit()"));
+}
+
+test "issue 5: @memcpy preserves both destination and source arguments" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    var a = [_]u8{1, 2, 3};
+        \\    var b = [_]u8{0, 0, 0};
+        \\    @memcpy(&b, &a);
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should contain both arguments in safe.SimdUtils.copy call
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.SimdUtils.copy"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "&b"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "&a"));
+}
+
+test "issue 6: while with continue expression transpiles without crash" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    var i: u32 = 0;
+        \\    while (i < 10) : (i += 1) {
+        \\        if (i == 5) break;
+        \\    }
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should still contain the while structure (loop counter inserted)
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "while (i < 10)"));
+}
+
+test "issue 7: function parameter with raw slice gets warning comment" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn processFile(filepath: []const u8) void {
+        \\    _ = filepath;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should contain a warning comment about raw slice parameters
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe-transpile: function uses raw slice parameter"));
+}
+
+test "issue 8: small constant slice return gets flagged or converted" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn getLineTerminator(null_data: bool) []const u8 {
+        \\    return if (null_data) &[_]u8{0} else "\\n";
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should contain a warning or conversion for small slice returns
+    try std.testing.expect(
+        std.mem.containsAtLeast(u8, output, 1, "safe-transpile: function returns small constant slice") or
+            std.mem.containsAtLeast(u8, output, 1, "safe.String"),
+    );
+}
+
+test "issue 9: C-interop struct initialized with zeroes instead of undefined" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\const std = @import("std");
+        \\fn foo() void {
+        \\    var st: std.posix.Stat = undefined;
+        \\    _ = std.posix.stat("/tmp", &st) catch {};
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should NOT contain "= undefined" for C-interop struct
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "std.posix.Stat = undefined"));
+    // Should use std.mem.zeroes
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "std.mem.zeroes(std.posix.Stat)"));
+}
+
+test "issue 10: @ptrCast gets alignment comment or @alignCast wrapper" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo(ptr: *u8) *u32 {
+        \\    return @ptrCast(ptr);
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should mention alignment in the review comment
+    try std.testing.expect(
+        std.mem.containsAtLeast(u8, output, 1, "@alignCast") or
+            std.mem.containsAtLeast(u8, output, 1, "alignment"),
+    );
 }
 
 // ─── CLI ───
