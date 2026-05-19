@@ -9,15 +9,15 @@ ARG ZIG_VERSION=0.16.0
 RUN apk add --no-cache curl tar xz bash
 
 # Download Zig based on target platform
-# Zig naming: zig-linux-<arch>-musl-<version>.tar.xz
+# Zig naming: zig-<arch>-linux-<version>.tar.xz
 RUN case "$TARGETPLATFORM" in \
-    "linux/amd64") ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-musl-${ZIG_VERSION}.tar.xz" ;; \
-    "linux/arm64") ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-aarch64-musl-${ZIG_VERSION}.tar.xz" ;; \
+    "linux/amd64") ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" ;; \
+    "linux/arm64") ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/zig-aarch64-linux-${ZIG_VERSION}.tar.xz" ;; \
     *) echo "Unsupported platform: $TARGETPLATFORM"; exit 1 ;; \
     esac && \
     curl -fsSL "$ZIG_URL" -o zig.tar.xz && \
     tar -xf zig.tar.xz && \
-    mv zig-linux-*-musl-${ZIG_VERSION} /opt/zig && \
+    mv zig-*-linux-${ZIG_VERSION} /opt/zig && \
     rm zig.tar.xz
 
 ENV PATH="/opt/zig:${PATH}"
