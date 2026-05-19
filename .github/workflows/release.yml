@@ -21,12 +21,19 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-linux
+            zig_target: x86_64-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-linux
+            zig_target: aarch64-linux-gnu
           - os: macos-latest
             target: aarch64-macos
+            zig_target: aarch64-macos-none
           - os: macos-13
             target: x86_64-macos
+            zig_target: x86_64-macos-none
           - os: windows-latest
             target: x86_64-windows
+            zig_target: x86_64-windows-gnu
 
     steps:
       - name: Checkout
@@ -37,26 +44,31 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: Build release binary
-        run: zig build -Doptimize=ReleaseSafe
+      - name: Build release binaries
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.zig_target }}
 
-      - name: Package binary (Unix)
+      - name: Package binaries (Unix)
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
           cp zig-out/bin/zust-analyze dist/zust-analyze-${{ matrix.target }}
+          cp zig-out/bin/zust-transpile dist/zust-transpile-${{ matrix.target }}
           chmod +x dist/zust-analyze-${{ matrix.target }}
+          chmod +x dist/zust-transpile-${{ matrix.target }}
+          cd dist && sha256sum zust-* > checksums.txt
 
-      - name: Package binary (Windows)
+      - name: Package binaries (Windows)
         if: runner.os == 'Windows'
         run: |
           New-Item -ItemType Directory -Force -Path dist
           Copy-Item zig-out/bin/zust-analyze.exe dist/zust-analyze-${{ matrix.target }}.exe
+          Copy-Item zig-out/bin/zust-transpile.exe dist/zust-transpile-${{ matrix.target }}.exe
+          Get-FileHash dist/*.exe -Algorithm SHA256 | Select-Object Hash, Path | Out-File -Encoding utf8 dist/checksums.txt
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: zust-analyze-${{ matrix.target }}
+          name: zust-${{ matrix.target }}
           path: dist/*
           retention-days: 5
 
@@ -80,10 +92,16 @@ jobs:
           path: artifacts
           merge-multiple: false
 
+      - name: Collect checksums
+        run: |
+          mkdir -p release
+          find artifacts -name 'checksums.txt' -exec cat {} \; > release/checksums.txt
+          find artifacts -type f ! -name 'checksums.txt' -exec cp {} release/ \;
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: release/*
           draft: false
           prerelease: false
           generate_release_notes: true
@@ -94,16 +112,32 @@ jobs:
             Zero-cost ownership and memory safety for Zig via comptime typestate.
 
             ### Binaries
-            - `zust-analyze-x86_64-linux` — Linux x86_64
-            - `zust-analyze-aarch64-macos` — macOS Apple Silicon
-            - `zust-analyze-x86_64-macos` — macOS Intel
-            - `zust-analyze-x86_64-windows.exe` — Windows x86_64
+            | Platform | Analyzer | Transpiler |
+            |----------|----------|------------|
+            | Linux x86_64 | `zust-analyze-x86_64-linux` | `zust-transpile-x86_64-linux` |
+            | Linux ARM64 | `zust-analyze-aarch64-linux` | `zust-transpile-aarch64-linux` |
+            | macOS Apple Silicon | `zust-analyze-aarch64-macos` | `zust-transpile-aarch64-macos` |
+            | macOS Intel | `zust-analyze-x86_64-macos` | `zust-transpile-x86_64-macos` |
+            | Windows x86_64 | `zust-analyze-x86_64-windows.exe` | `zust-transpile-x86_64-windows.exe` |
+
+            ### SHA-256 Checksums
+            See `checksums.txt` in the release assets.
 
             ### Usage
             ```bash
+            # Analyzer
             ./zust-analyze <file.zig> [options]
             ./zust-analyze --lsp  # LSP server mode
+
+            # Transpiler
+            ./zust-transpile <input.zig> <output.zig>
             ```
 
             ### Installation
-            Download the binary for your platform and place it on your PATH.
+            Download the binaries for your platform, verify checksums, and place them on your PATH.
+
+            ### Docker
+            ```bash
+            docker pull ghcr.io/e-jerk/zust:${{ github.ref_name }}
+            docker run --rm ghcr.io/e-jerk/zust:${{ github.ref_name }} zust-analyze --help
+            ```

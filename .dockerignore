@@ -1,0 +1,14 @@
+.git
+.gitignore
+.github
+.zig-cache
+zig-out
+*.md
+docs/
+examples/
+benchmarks/
+vscode-extension/
+tests/
+scripts/
+Dockerfile
+.dockerignore
