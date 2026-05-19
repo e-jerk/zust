@@ -772,7 +772,8 @@ pub const Analyzer = struct {
                     std.mem.indexOf(u8, type_text, "StringHashMapUnmanaged") != null or
                     std.mem.indexOf(u8, type_text, "AutoHashMapUnmanaged") != null or
                     std.mem.indexOf(u8, type_text, "MultiArrayList") != null or
-                    std.mem.indexOf(u8, type_text, "SegmentedList") != null) {
+                    std.mem.indexOf(u8, type_text, "SegmentedList") != null)
+                {
                     is_std_container = true;
                 }
             }
