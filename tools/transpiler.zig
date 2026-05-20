@@ -365,13 +365,66 @@ pub const Transpiler = struct {
 
         var needs_param_comment = false;
         var needs_return_comment = false;
+        
+        // NEW: Collect *T → safe.Box(T) conversions for this function
+        var box_conversions = std.ArrayList(BoxConversion).empty;
+        defer {
+            for (box_conversions.items) |conv| {
+                self._allocator.free(conv.name);
+                self._allocator.free(conv.inner_type);
+            }
+            box_conversions.deinit(self._allocator);
+        }
 
-        // Check each parameter's type
-        for (proto.ast.params) |param_type| {
-            const type_span = ast.nodeToSpan(param_type);
-            const type_text = source[type_span.start..type_span.end];
+        // Check each parameter's type using the param iterator
+        var param_it = proto.iterate(ast);
+        while (param_it.next()) |param| {
+            // Get parameter name if available
+            const param_name = if (param.name_token) |nt| ast.tokenSlice(nt) else "";
+            
+            // Get parameter type if available
+            const type_text = if (param.type_expr) |type_node| blk: {
+                const type_span = ast.nodeToSpan(type_node);
+                break :blk source[type_span.start..type_span.end];
+            } else "";
+            
+            if (type_text.len == 0) continue;
+            
+            // Check for slice types (existing behavior)
             if (std.mem.eql(u8, type_text, "[]const u8") or std.mem.eql(u8, type_text, "[]u8")) {
                 needs_param_comment = true;
+                continue;
+            }
+            
+            // NEW: Check for *T / *const T / ?*T pointer types
+            if (isConvertiblePointerType(type_text)) {
+                const inner_type = extractPointerInnerType(type_text);
+                
+                // Skip self/this parameters (method receivers)
+                const is_self = std.mem.eql(u8, param_name, "self") or std.mem.eql(u8, param_name, "this");
+                
+                if (shouldConvertToBox(inner_type) and !is_self) {
+                    if (param.type_expr) |type_node| {
+                        const type_span = ast.nodeToSpan(type_node);
+                        
+                        // Handle optional pointer: ?*T → ?safe.Box(T)
+                        const is_optional = std.mem.startsWith(u8, type_text, "?");
+                        const repl = if (is_optional)
+                            try std.fmt.allocPrint(self._allocator, "?safe.Box({s})", .{inner_type})
+                        else
+                            try std.fmt.allocPrint(self._allocator, "safe.Box({s})", .{inner_type});
+                        
+                        try self.addEdit(type_span.start, type_span.end, repl);
+                    }
+                    
+                    // Record parameter name for body rewrite
+                    if (param_name.len > 0) {
+                        try box_conversions.append(self._allocator, .{
+                            .name = try self._allocator.dupe(u8, param_name),
+                            .inner_type = try self._allocator.dupe(u8, inner_type),
+                        });
+                    }
+                }
             }
         }
 
@@ -385,21 +438,111 @@ pub const Transpiler = struct {
             }
         }
 
-        if (needs_param_comment or needs_return_comment) {
-            const span = ast.nodeToSpan(node);
-            var line_start = span.start;
-            while (line_start > 0 and source[line_start - 1] != '\n') {
-                line_start -= 1;
-            }
+        // Emit comments
+        const span = ast.nodeToSpan(node);
+        var line_start = span.start;
+        while (line_start > 0 and source[line_start - 1] != '\n') {
+            line_start -= 1;
+        }
 
-            if (needs_param_comment) {
-                const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: function uses raw slice parameter — consider safe.String\n", .{});
-                try self.addEdit(line_start, line_start, repl);
+        if (box_conversions.items.len > 0) {
+            var comment = std.ArrayList(u8).empty;
+            defer comment.deinit(self._allocator);
+            try comment.appendSlice(self._allocator, "// safe-transpile: parameters converted to safe.Box — callers must update\n");
+            for (box_conversions.items) |conv| {
+                const line = try std.fmt.allocPrint(self._allocator, "//   {s}: safe.Box({s})\n", .{conv.name, conv.inner_type});
+                defer self._allocator.free(line);
+                try comment.appendSlice(self._allocator, line);
             }
-            if (needs_return_comment) {
-                const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: function returns small constant slice — consider safe.String\n", .{});
-                try self.addEdit(line_start, line_start, repl);
+            // Dupe to transfer ownership to addEdit
+            const comment_duped = try self._allocator.dupe(u8, comment.items);
+            try self.addEdit(line_start, line_start, comment_duped);
+        }
+
+        if (needs_param_comment) {
+            const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: function uses raw slice parameter — consider safe.String\n", .{});
+            try self.addEdit(line_start, line_start, repl);
+        }
+        if (needs_return_comment) {
+            const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: function returns small constant slice — consider safe.String\n", .{});
+            try self.addEdit(line_start, line_start, repl);
+        }
+        
+        // NEW: If we converted params, rewrite body dereferences
+        if (box_conversions.items.len > 0) {
+            try self.rewriteBoxDereferencesInBody(node, box_conversions.items);
+        }
+    }
+    
+    /// NEW: Rewrite dereferences of Box parameters within function body
+    fn rewriteBoxDereferencesInBody(self: *Self, _fn_node: std.zig.Ast.Node.Index, box_params: []const BoxConversion) !void {
+        _ = _fn_node;
+        const ast = &self.ast.?;
+        
+        // Iterate through all nodes in the function body
+        // We look for identifier nodes that match converted parameter names
+        for (0..ast.nodes.len) |i| {
+            const node_idx: std.zig.Ast.Node.Index = @enumFromInt(i);
+            const tag = ast.nodeTag(node_idx);
+            if (tag != .identifier) continue;
+            
+            const token_idx = ast.nodeMainToken(node_idx);
+            const ident_text = ast.tokenSlice(token_idx);
+            
+            // Check if this identifier matches any converted Box parameter
+            for (box_params) |conv| {
+                if (std.mem.eql(u8, ident_text, conv.name)) {
+                    const ident_span = ast.tokenToSpan(token_idx);
+                    try self.rewriteIdentifierIfBoxParam(node_idx, ident_text, ident_span, box_params);
+                    break;
+                }
             }
+        }
+    }
+    
+    /// NEW: Rewrite a single identifier usage based on parent context
+    fn rewriteIdentifierIfBoxParam(self: *Self, _node: std.zig.Ast.Node.Index, ident_text: []const u8, ident_span: std.zig.Ast.Span, _box_params: []const BoxConversion) !void {
+        _ = _node;
+        _ = _box_params;
+        const source = self.source.slice();
+        
+        // Find parent node (we need to scan nodes to find which one has this node as child)
+        // For simplicity, we look at the text after the identifier to determine context
+        var pos = ident_span.end;
+        while (pos < source.len and std.ascii.isWhitespace(source[pos])) pos += 1;
+        
+        if (pos >= source.len) return;
+        
+        const next_char = source[pos];
+        
+        // Pattern: param.* → param.ptr.*
+        if (next_char == '.' and pos + 1 < source.len and source[pos + 1] == '*') {
+            // Rewrite `ident` with `ident.ptr` (the `.*` stays)
+            const repl = try std.fmt.allocPrint(self._allocator, "{s}.ptr", .{ident_text});
+            try self.addEdit(ident_span.start, ident_span.end, repl);
+            return;
+        }
+        
+        // Pattern: param.field → param.ptr.field
+        if (next_char == '.' and pos + 1 < source.len and source[pos + 1] != '*') {
+            // Rewrite `ident` with `ident.ptr`
+            const repl = try std.fmt.allocPrint(self._allocator, "{s}.ptr", .{ident_text});
+            try self.addEdit(ident_span.start, ident_span.end, repl);
+            return;
+        }
+        
+        // Pattern: param[index] → param.ptr[index]
+        if (next_char == '[') {
+            const repl = try std.fmt.allocPrint(self._allocator, "{s}.ptr", .{ident_text});
+            try self.addEdit(ident_span.start, ident_span.end, repl);
+            return;
+        }
+        
+        // Pattern: param + N or param - N → param.ptr + N / param.ptr - N
+        if (next_char == '+' or next_char == '-') {
+            const repl = try std.fmt.allocPrint(self._allocator, "{s}.ptr", .{ident_text});
+            try self.addEdit(ident_span.start, ident_span.end, repl);
+            return;
         }
     }
 
@@ -948,6 +1091,181 @@ const Edit = struct {
     replacement: []const u8,
 };
 
+/// NEW: Records a parameter that was converted from *T to safe.Box(T)
+const BoxConversion = struct {
+    name: []const u8,
+    inner_type: []const u8,
+};
+
+/// NEW: Get the type text from a function parameter AST node
+/// Returns the type text if found, or null if no type annotation
+fn getParamTypeText(ast: *const std.zig.Ast, param_node: std.zig.Ast.Node.Index, source: []const u8) ?[]const u8 {
+    const tag = ast.nodeTag(param_node);
+    switch (tag) {
+        .identifier => return null, // no type annotation
+        .anyframe_literal => return null,
+        else => {
+            // For fn params with type annotations, the param node is typically
+            // a .simple_var_decl or similar. We extract the type by string parsing.
+            
+            const param_span = ast.nodeToSpan(param_node);
+            const param_text = source[param_span.start..param_span.end];
+            
+            // Find the colon separating name from type
+            if (std.mem.indexOfScalar(u8, param_text, ':')) |colon_idx| {
+                // Type is everything after the colon, trimmed
+                const after_colon = param_text[colon_idx + 1 ..];
+                const trimmed = std.mem.trim(u8, after_colon, &std.ascii.whitespace);
+                if (trimmed.len > 0) return trimmed;
+            }
+            
+            return null;
+        },
+    }
+}
+
+/// NEW: Extract parameter name from AST and duplicate it
+fn getParamNameAlloc(allocator: std.mem.Allocator, ast: *const std.zig.Ast, param_node: std.zig.Ast.Node.Index, source: []const u8) ![]const u8 {
+    const tag = ast.nodeTag(param_node);
+    
+    if (tag == .identifier) {
+        // Parameter with no type: `name` (just the identifier)
+        const span = ast.nodeToSpan(param_node);
+        return try allocator.dupe(u8, source[span.start..span.end]);
+    }
+    
+    // For param nodes with type annotations, the name is the main token
+    const main_tok = ast.nodeMainToken(param_node);
+    const tok_start = ast.tokens.items(.start)[main_tok];
+    const tok_tag = ast.tokens.items(.tag)[main_tok];
+    
+    // The parameter name token follows the main token (which is typically `:` or a keyword)
+    // In Zig AST, for param nodes, the name is usually at main_token or main_token + 1
+    if (tok_tag == .identifier) {
+        const tok_end = tok_start + ast.tokenSlice(main_tok).len;
+        return try allocator.dupe(u8, source[tok_start..tok_end]);
+    }
+    
+    // Try main_token + 1
+    if (main_tok + 1 < ast.tokens.len) {
+        const next_tag = ast.tokens.items(.tag)[main_tok + 1];
+        if (next_tag == .identifier) {
+            const next_start = ast.tokens.items(.start)[main_tok + 1];
+            const next_slice = ast.tokenSlice(main_tok + 1);
+            return try allocator.dupe(u8, source[next_start..next_start + next_slice.len]);
+        }
+    }
+    
+    // Fallback: try to extract from source span
+    const span = ast.nodeToSpan(param_node);
+    const text = source[span.start..span.end];
+    
+    // Find first identifier before `:`
+    if (std.mem.indexOfScalar(u8, text, ':')) |colon_pos| {
+        const before = text[0..colon_pos];
+        // Trim whitespace
+        var start: usize = 0;
+        while (start < before.len and std.ascii.isWhitespace(before[start])) start += 1;
+        var end = before.len;
+        while (end > start and std.ascii.isWhitespace(before[end - 1])) end -= 1;
+        if (end > start) {
+            return try allocator.dupe(u8, before[start..end]);
+        }
+    }
+    
+    return try allocator.dupe(u8, "");
+}
+
+/// NEW: Check if a type text represents a convertible single pointer (*T, *const T, ?*T, ?*const T)
+fn isConvertiblePointerType(type_text: []const u8) bool {
+    // Skip slice types
+    if (std.mem.startsWith(u8, type_text, "[]")) return false;
+    // Skip many-item pointers
+    if (std.mem.startsWith(u8, type_text, "[*")) return false;
+    
+    // Check optional pointer: ?*T, ?*const T
+    if (std.mem.startsWith(u8, type_text, "?*")) {
+        const after = type_text[2..];
+        if (after.len == 0) return false;
+        // Skip double pointers
+        if (after[0] == '*') return false;
+        // Skip opaque
+        if (std.mem.indexOf(u8, after, "anyopaque") != null) return false;
+        return true;
+    }
+    
+    // Check single pointer: *T, *const T
+    if (std.mem.startsWith(u8, type_text, "*")) {
+        const after = type_text[1..];
+        if (after.len == 0) return false;
+        // Skip double pointers
+        if (after[0] == '*') return false;
+        // Skip opaque
+        if (std.mem.indexOf(u8, after, "anyopaque") != null) return false;
+        return true;
+    }
+    
+    return false;
+}
+
+/// NEW: Extract the inner type T from *T, *const T, ?*T, ?*const T
+fn extractPointerInnerType(type_text: []const u8) []const u8 {
+    var start: usize = 0;
+    
+    // Skip ?
+    if (type_text.len > 0 and type_text[0] == '?') {
+        start = 1;
+    }
+    
+    // Skip *
+    if (start < type_text.len and type_text[start] == '*') {
+        start += 1;
+    }
+    
+    // Skip "const "
+    if (start + 6 <= type_text.len and std.mem.eql(u8, type_text[start..start + 6], "const ")) {
+        start += 6;
+    }
+    
+    // Skip leading whitespace
+    while (start < type_text.len and std.ascii.isWhitespace(type_text[start])) {
+        start += 1;
+    }
+    
+    return type_text[start..];
+}
+
+/// NEW: Determine if inner type should be wrapped in Box
+fn shouldConvertToBox(inner_type: []const u8) bool {
+    if (inner_type.len == 0) return false;
+    
+    // Skip scalar/primitive types — these use array-index rewrite instead
+    const scalar_types = [_][]const u8{
+        "bool", "u8", "u16", "u32", "u64", "u128",
+        "i8", "i16", "i32", "i64", "i128",
+        "f16", "f32", "f64", "f128",
+        "usize", "isize", "c_int", "c_uint", "c_short", "c_long", "c_ulong",
+        "void", "noreturn", "anyopaque", "type", "comptime_int", "comptime_float",
+    };
+    for (scalar_types) |scalar| {
+        if (std.mem.eql(u8, inner_type, scalar)) return false;
+    }
+    
+    // Skip function pointer types
+    if (std.mem.startsWith(u8, inner_type, "fn(")) return false;
+    if (std.mem.startsWith(u8, inner_type, "*fn")) return false;
+    
+    // Skip C interop types
+    if (std.mem.eql(u8, inner_type, "c_void")) return false;
+    if (std.mem.eql(u8, inner_type, "anyopaque")) return false;
+    if (std.mem.startsWith(u8, inner_type, "extern")) return false;
+    
+    // Skip allocator references (always borrowed)
+    if (std.mem.indexOf(u8, inner_type, "Allocator") != null) return false;
+    
+    return true;
+}
+
 // ─── Tests ───
 
 test "pattern 1: allocator.create/destroy → safe.Box" {
@@ -1412,6 +1730,120 @@ test "issue 1: array zero-initialization replaces undefined with empty init" {
         std.mem.containsAtLeast(u8, output, 1, "[256]u8 = .{}") or
             std.mem.containsAtLeast(u8, output, 1, "std.mem.zeroes([256]u8)"),
     );
+}
+
+// ─── NEW: safe.Box(T) Parameter Conversion Tests ───
+
+test "pattern: *T param → safe.Box(T) with body rewrites" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn process(node: *Node) void {
+        \\    node.*.next = null;
+        \\    node.data = 42;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "node: safe.Box(Node)"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "node.ptr.*.next = null"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "node.ptr.data = 42"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.Box — callers must update"));
+}
+
+test "pattern: *const T param → safe.Box(T) with body rewrites" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn read(data: *const Node, len: usize) u8 {
+        \\    return data.value;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "data: safe.Box(Node)"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "data.ptr.value"));
+}
+
+test "pattern: ?*T param → ?safe.Box(T)" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn maybeProcess(opt: ?*Node) void {
+        \\    if (opt) |node| {
+        \\        node.data = 1;
+        \\    }
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "opt: ?safe.Box(Node)"));
+}
+
+test "skip: []T param gets comment only (not Box)" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn process(data: []u8) void {
+        \\    data[0] = 1;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should NOT convert to Box
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "safe.Box(u8)"));
+    // Should add comment
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "raw slice parameter"));
+}
+
+test "skip: **T param not converted" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn process(node: **Node) void {
+        \\    node.*.*.next = null;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "safe.Box(Node)"));
+}
+
+test "skip: *anyopaque param not converted" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn process(ptr: *anyopaque) void {
+        \\    _ = ptr;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "safe.Box(anyopaque)"));
 }
 
 test "issue 2: for loop with pointer capture rewritten to index-based" {
