@@ -75,5 +75,7 @@ jobs:
 
       - name: Verify image
         run: |
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} zust-analyze --help
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} zust-transpile --help || true
+          # Use the first tag from metadata (short sha)
+          FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          docker run --rm "${FIRST_TAG}" zust-analyze --help
+          docker run --rm "${FIRST_TAG}" zust-transpile --help || true
