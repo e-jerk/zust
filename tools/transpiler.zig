@@ -117,8 +117,12 @@ pub const Transpiler = struct {
                 .while_simple, .while_cont, .@"while" => {
                     try self.handleWhile(node);
                 },
-                .fn_proto, .fn_proto_multi, .fn_proto_one, .fn_proto_simple => {
-                    try self.handleFnProto(node);
+                .fn_decl => {
+                    // fn_decl contains proto + body; process both together
+                    const data = ast.nodeData(node).node_and_node;
+                    const proto = data[0];
+                    const body = data[1];
+                    try self.handleFnDecl(proto, body);
                 },
                 else => {},
             }
@@ -348,8 +352,8 @@ pub const Transpiler = struct {
         }
     }
 
-    /// Handle function prototypes (issues 7 and 8: raw slice parameters and returns)
-    fn handleFnProto(self: *Self, node: std.zig.Ast.Node.Index) !void {
+    /// Handle function declarations (proto + body) for parameter/return comments and Box conversions
+    fn handleFnDecl(self: *Self, node: std.zig.Ast.Node.Index, body_node: std.zig.Ast.Node.Index) !void {
         const ast = &self.ast.?;
         const source = self.source.slice();
         const tag = ast.nodeTag(node);
@@ -362,6 +366,17 @@ pub const Transpiler = struct {
             .fn_proto_simple => ast.fnProtoSimple(&buffer, node),
             else => return,
         };
+
+        // Check if function is public — if so, skip Box conversions (would break callers)
+        // fn_proto main token is 'fn'; look backward on the same line for 'pub'
+        const main_tok = ast.nodeMainToken(node);
+        const fn_start = ast.tokens.items(.start)[main_tok];
+        var fn_line_start = fn_start;
+        while (fn_line_start > 0 and source[fn_line_start - 1] != '\n') {
+            fn_line_start -= 1;
+        }
+        const fn_prefix = source[fn_line_start..fn_start];
+        const is_public = std.mem.indexOf(u8, fn_prefix, "pub") != null;
 
         var needs_param_comment = false;
         var needs_return_comment = false;
@@ -403,7 +418,7 @@ pub const Transpiler = struct {
                 // Skip self/this parameters (method receivers)
                 const is_self = std.mem.eql(u8, param_name, "self") or std.mem.eql(u8, param_name, "this");
                 
-                if (shouldConvertToBox(inner_type) and !is_self) {
+                if (shouldConvertToBox(inner_type) and !is_self and !is_public) {
                     if (param.type_expr) |type_node| {
                         const type_span = ast.nodeToSpan(type_node);
                         
@@ -470,29 +485,41 @@ pub const Transpiler = struct {
         
         // NEW: If we converted params, rewrite body dereferences
         if (box_conversions.items.len > 0) {
-            try self.rewriteBoxDereferencesInBody(node, box_conversions.items);
+            try self.rewriteBoxDereferencesInBody(body_node, box_conversions.items);
         }
     }
     
     /// NEW: Rewrite dereferences of Box parameters within function body
-    fn rewriteBoxDereferencesInBody(self: *Self, _fn_node: std.zig.Ast.Node.Index, box_params: []const BoxConversion) !void {
-        _ = _fn_node;
+    fn rewriteBoxDereferencesInBody(self: *Self, body_node: std.zig.Ast.Node.Index, box_params: []const BoxConversion) !void {
         const ast = &self.ast.?;
+        const source = self.source.slice();
         
-        // Iterate through all nodes in the function body
-        // We look for identifier nodes that match converted parameter names
+        // Get body span to limit search to this function only
+        const body_first = ast.firstToken(body_node);
+        const body_last = ast.lastToken(body_node);
+        const body_start = ast.tokens.items(.start)[body_first];
+        var body_end = source.len;
+        if (body_last + 1 < ast.tokens.len) {
+            body_end = ast.tokens.items(.start)[body_last + 1];
+        }
+        
+        // Iterate through all nodes, but only process identifiers within body span
         for (0..ast.nodes.len) |i| {
             const node_idx: std.zig.Ast.Node.Index = @enumFromInt(i);
             const tag = ast.nodeTag(node_idx);
             if (tag != .identifier) continue;
             
             const token_idx = ast.nodeMainToken(node_idx);
+            const ident_span = ast.tokenToSpan(token_idx);
+            
+            // Skip identifiers outside the function body
+            if (ident_span.start < body_start or ident_span.end > body_end) continue;
+            
             const ident_text = ast.tokenSlice(token_idx);
             
             // Check if this identifier matches any converted Box parameter
             for (box_params) |conv| {
                 if (std.mem.eql(u8, ident_text, conv.name)) {
-                    const ident_span = ast.tokenToSpan(token_idx);
                     try self.rewriteIdentifierIfBoxParam(node_idx, ident_text, ident_span, box_params);
                     break;
                 }
@@ -552,6 +579,22 @@ pub const Transpiler = struct {
         const source = self.source.slice();
         const vd = ast.fullVarDecl(node) orelse return;
 
+        // Skip extern variables — they cannot have initializers and must not be modified
+        const main_tok = ast.nodeMainToken(node);
+        const tok_start = ast.tokens.items(.start)[main_tok];
+        var line_start = tok_start;
+        while (line_start > 0 and source[line_start - 1] != '\n') {
+            line_start -= 1;
+        }
+        const before_var = source[line_start..tok_start];
+        // Check for 'extern' keyword (not in a comment) before var/const
+        if (std.mem.indexOf(u8, before_var, "extern")) |extern_pos| {
+            const comment_pos = std.mem.indexOf(u8, before_var, "//");
+            if (comment_pos == null or extern_pos < comment_pos.?) {
+                return;
+            }
+        }
+
         // Rewrite []u8 and []const u8 type annotations to safe.Slice(u8)
         if (vd.ast.type_node != .none) {
             const type_node: std.zig.Ast.Node.Index = vd.ast.type_node.unwrap().?;
@@ -579,10 +622,14 @@ pub const Transpiler = struct {
                 const init_text = source[init_span.start..init_span.end];
                 if (std.mem.eql(u8, init_text, "undefined")) {
                     if (type_text.len > 0 and type_text[0] == '[') {
-                        // Array type: replace undefined with .{}
-                        const repl = try std.fmt.allocPrint(self._allocator, ".{{}}", .{});
-                        try self.addEdit(init_span.start, init_span.end, repl);
-                    } else if (std.mem.indexOf(u8, type_text, ".") != null) {
+                        // Array type: skip — .{} creates 0-element array, not zero-initialized
+                        // Arrays with undefined are valid; user can @memset if needed
+                        return;
+                    } else if (std.mem.indexOf(u8, type_text, ".") != null and
+                        std.mem.indexOf(u8, type_text, "*") == null and
+                        std.mem.indexOf(u8, type_text, "enum") == null and
+                        std.mem.indexOf(u8, type_text, "union") == null)
+                    {
                         // Namespaced type like std.posix.Stat: use std.mem.zeroes
                         const repl = try std.fmt.allocPrint(self._allocator, "std.mem.zeroes({s})", .{type_text});
                         try self.addEdit(init_span.start, init_span.end, repl);
@@ -822,7 +869,10 @@ pub const Transpiler = struct {
         var before_pos = span.start;
         while (before_pos > 0 and std.ascii.isWhitespace(source[before_pos - 1])) before_pos -= 1;
         var is_return = false;
-        if (before_pos >= 7 and std.mem.eql(u8, source[before_pos - 7 .. before_pos], "return ")) {
+        // before_pos is now at the first non-whitespace char before the expression
+        // (or the space after "return" if there was whitespace between them).
+        // We check for "return" ending at before_pos.
+        if (before_pos >= 6 and std.mem.eql(u8, source[before_pos - 6 .. before_pos], "return")) {
             is_return = true;
         }
 
@@ -1331,7 +1381,7 @@ test "pattern 3: std.StringHashMap → safe.HashMap" {
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.HashMap(safe.String, i32)"));
 }
 
-test "pattern 5: raw optional dereference → checked access" {
+test "pattern 5: raw optional dereference in return gets comment" {
     const allocator = std.testing.allocator;
     const input =
         \\const std = @import("std");
@@ -1346,6 +1396,30 @@ test "pattern 5: raw optional dereference → checked access" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
+    // In return context, we can't safely rewrite .? → if/else (would produce invalid nested return)
+    // So we just add a comment
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe-transpile: optional unwrap requires manual review"));
+    // Should NOT contain the if/else rewrite
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "if (opt) |value|"));
+}
+
+test "pattern 5b: raw optional dereference in non-return context → checked access" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\const std = @import("std");
+        \\fn foo(opt: ?i32) i32 {
+        \\    const x = opt.?;
+        \\    return x;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // In non-return context, we can safely rewrite
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "if (opt) |value|"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "return error.NullPointer"));
 }
@@ -1708,7 +1782,7 @@ test "pattern: std.debug.print with pointer gets redacted" {
 
 // ─── Transpiler Bug-Fix Tests (Issue Tracker) ───
 
-test "issue 1: array zero-initialization replaces undefined with empty init" {
+test "issue 1: array undefined is kept as-is (no .{} rewrite)" {
     const allocator = std.testing.allocator;
     const input =
         \\fn foo() void {
@@ -1723,13 +1797,8 @@ test "issue 1: array zero-initialization replaces undefined with empty init" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    // Should NOT contain "= undefined" for array types
-    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "[256]u8 = undefined"));
-    // Should contain empty initialization or zeroes
-    try std.testing.expect(
-        std.mem.containsAtLeast(u8, output, 1, "[256]u8 = .{}") or
-            std.mem.containsAtLeast(u8, output, 1, "std.mem.zeroes([256]u8)"),
-    );
+    // Arrays keep undefined — .{} creates 0-element array literal, not zero-init
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "[256]u8 = undefined"));
 }
 
 // ─── NEW: safe.Box(T) Parameter Conversion Tests ───
@@ -2105,6 +2174,109 @@ test "issue 13: allocator.free in if body replaced with no-op so next statement 
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "_ = undefined;"));
     // The deinit should NOT have become the if body
     try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "if (x != null) _ = undefined; allocator.deinit()"));
+}
+
+// ─── Transpiler Bug-Fix Tests (Bulk Application Issues) ───
+
+test "bugfix: extern variables are never modified" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\pub extern "C" var _environ: ?*anyopaque = undefined;
+        \\pub extern "C" var environ: ?*anyopaque = undefined;
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should remain completely unchanged
+    try std.testing.expect(std.mem.eql(u8, input, output));
+}
+
+test "bugfix: array undefined is not rewritten to .{}" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    var buf: [256]u8 = undefined;
+        \\    _ = buf;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should NOT contain .{} for array init
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "[256]u8 = .{}"));
+    // Should keep undefined
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "[256]u8 = undefined"));
+}
+
+test "bugfix: pub fn *T param is not converted to safe.Box" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\pub fn process(node: *Node) void {
+        \\    node.*.next = null;
+        \\    node.data = 42;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should NOT convert pub fn params to Box
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "safe.Box(Node)"));
+    // Should keep original signature unchanged
+    try std.testing.expect(std.mem.eql(u8, input, output));
+}
+
+test "bugfix: non-pub fn *T param IS converted to safe.Box" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn process(node: *Node) void {
+        \\    node.*.next = null;
+        \\    node.data = 42;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should convert non-pub fn params to Box
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "node: safe.Box(Node)"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "node.ptr.*.next = null"));
+}
+
+test "bugfix: types with pointers skip std.mem.zeroes" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\const S = struct { ptr: *u8 };
+        \\fn foo() void {
+        \\    var st: S = undefined;
+        \\    _ = st;
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should NOT use std.mem.zeroes for types containing pointers
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "std.mem.zeroes(S)"));
+    // Should keep undefined
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "var st: S = undefined"));
 }
 
 // ─── CLI ───
