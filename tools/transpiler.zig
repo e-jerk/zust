@@ -285,7 +285,9 @@ pub const Transpiler = struct {
         // Pattern: allocator.free(slice)  →  no-op (safe types own their memory)
         if (std.mem.eql(u8, fn_text, "free") or std.mem.endsWith(u8, fn_text, ".free")) {
             const call_span = ast.nodeToSpan(node);
-            const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: free removed (memory owned by safe type)", .{});
+            // Use a no-op statement so the replacement is still a valid statement
+            // when it serves as the single-statement body of for/if/while.
+            const repl = try std.fmt.allocPrint(self._allocator, "_ = undefined; // safe-transpile: free removed (memory owned by safe type)", .{});
             try self.addEdit(call_span.start, call_span.end, repl);
         }
     }
@@ -520,6 +522,41 @@ pub const Transpiler = struct {
                 }
             }
 
+            // If body is just allocator.free(capture), change capture to |_|
+            // so the transpiled code compiles (capture would otherwise be unused).
+            const body_node = for_info.ast.then_expr;
+            const body_tag = ast.nodeTag(body_node);
+            if (body_tag == .call_one or body_tag == .call) {
+                var buf: [1]std.zig.Ast.Node.Index = undefined;
+                const call_info = switch (body_tag) {
+                    .call_one => ast.callOne(&buf, body_node),
+                    .call => ast.callFull(body_node),
+                    else => unreachable,
+                };
+                const fn_expr = call_info.ast.fn_expr;
+                const fn_span = ast.nodeToSpan(fn_expr);
+                const fn_text = source[fn_span.start..fn_span.end];
+                if (call_info.ast.params.len == 1) {
+                    const param_span = ast.nodeToSpan(call_info.ast.params[0]);
+                    const param_text = source[param_span.start..param_span.end];
+                    if (std.mem.eql(u8, fn_text, "free") or std.mem.endsWith(u8, fn_text, ".free")) {
+                        const payload_token = for_info.payload_token;
+                        const capture_token = if (ast.tokens.items(.tag)[payload_token] == .asterisk)
+                            payload_token + 1
+                        else
+                            payload_token;
+                        const capture_name = ast.tokenSlice(capture_token);
+                        // Check if param text starts with capture name (covers capture, capture.*, capture.field)
+                        if (std.mem.eql(u8, param_text, capture_name) or std.mem.startsWith(u8, param_text, capture_name)) {
+                            const capture_span_start = ast.tokens.items(.start)[capture_token];
+                            const capture_span_end = capture_span_start + capture_name.len;
+                            const repl = try std.fmt.allocPrint(self._allocator, "_", .{});
+                            try self.addEdit(capture_span_start, capture_span_end, repl);
+                        }
+                    }
+                }
+            }
+
             // Existing: for with index access warning
             if (for_info.ast.inputs.len >= 2) {
                 const span = ast.nodeToSpan(node);
@@ -554,6 +591,48 @@ pub const Transpiler = struct {
             return;
         }
 
+        // If body is just allocator.free(capture), change capture to |_|
+        const body_tag = ast.nodeTag(body_expr);
+        if (body_tag == .call_one or body_tag == .call) {
+            var buf: [1]std.zig.Ast.Node.Index = undefined;
+            const call_info = switch (body_tag) {
+                .call_one => ast.callOne(&buf, body_expr),
+                .call => ast.callFull(body_expr),
+                else => unreachable,
+            };
+            const fn_expr = call_info.ast.fn_expr;
+            const fn_span = ast.nodeToSpan(fn_expr);
+            const fn_text = source[fn_span.start..fn_span.end];
+            if (call_info.ast.params.len == 1) {
+                const param_span = ast.nodeToSpan(call_info.ast.params[0]);
+                const param_text = source[param_span.start..param_span.end];
+                if (std.mem.eql(u8, fn_text, "free") or std.mem.endsWith(u8, fn_text, ".free")) {
+                    // Try to get payload token from whileSimple, whileCont, or whileFull
+                    const payload_token = if (tag == .while_simple)
+                        ast.whileSimple(node).payload_token
+                    else if (tag == .while_cont)
+                        ast.whileCont(node).payload_token
+                    else if (tag == .@"while")
+                        ast.whileFull(node).payload_token
+                    else
+                        null;
+                    if (payload_token) |pt| {
+                        const capture_token = if (ast.tokens.items(.tag)[pt] == .asterisk)
+                            pt + 1
+                        else
+                            pt;
+                        const capture_name = ast.tokenSlice(capture_token);
+                        if (std.mem.eql(u8, param_text, capture_name) or std.mem.startsWith(u8, param_text, capture_name)) {
+                            const capture_span_start = ast.tokens.items(.start)[capture_token];
+                            const capture_span_end = capture_span_start + capture_name.len;
+                            const repl = try std.fmt.allocPrint(self._allocator, "_", .{});
+                            try self.addEdit(capture_span_start, capture_span_end, repl);
+                        }
+                    }
+                }
+            }
+        }
+
         // Check if condition is `true`
         if (ast.nodeTag(cond_expr) != .identifier) return;
         const cond_token = ast.nodeMainToken(cond_expr);
@@ -568,7 +647,6 @@ pub const Transpiler = struct {
         try self.addEdit(while_pos, while_pos, decl_repl);
 
         // Insert guard inside body if it's a block
-        const body_tag = ast.nodeTag(body_expr);
         const is_block = std.mem.startsWith(u8, @tagName(body_tag), "block");
         if (is_block) {
             const lbrace_token = ast.nodeMainToken(body_expr);
@@ -1525,6 +1603,76 @@ test "issue 10: @ptrCast gets alignment comment or @alignCast wrapper" {
         std.mem.containsAtLeast(u8, output, 1, "@alignCast") or
             std.mem.containsAtLeast(u8, output, 1, "alignment"),
     );
+}
+
+test "issue 11: allocator.free in for-loop body replaced with no-op, capture changed to |_|" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo(allocator: std.mem.Allocator) void {
+        \\    var items: [3]u8 = undefined;
+        \\    for (items) |item| allocator.free(item);
+        \\    allocator.deinit();
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should contain no-op instead of bare comment
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "_ = undefined;"));
+    // Capture should be |_| so it compiles
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "for (items) |_|"));
+    // The next statement (deinit) should NOT have become the loop body
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "for (items) |_| allocator.deinit()"));
+}
+
+test "issue 12: allocator.free in while-loop body replaced with no-op, capture changed to |_|" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo(allocator: std.mem.Allocator) void {
+        \\    var it: ?u8 = null;
+        \\    while (it) |entry| allocator.free(entry);
+        \\    allocator.deinit();
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should contain no-op instead of bare comment
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "_ = undefined;"));
+    // Capture should be |_| so it compiles
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "while (it) |_|"));
+    // The next statement (deinit) should NOT have become the loop body
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "while (it) |_| allocator.deinit()"));
+}
+
+test "issue 13: allocator.free in if body replaced with no-op so next statement stays outside" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo(allocator: std.mem.Allocator) void {
+        \\    var x: ?u8 = null;
+        \\    if (x != null) allocator.free(x.?);
+        \\    allocator.deinit();
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // Should contain no-op instead of bare comment
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "_ = undefined;"));
+    // The deinit should NOT have become the if body
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "if (x != null) _ = undefined; allocator.deinit()"));
 }
 
 // ─── CLI ───
