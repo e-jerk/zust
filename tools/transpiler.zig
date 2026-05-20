@@ -16,6 +16,7 @@ pub const Transpiler = struct {
     ast: ?std.zig.Ast,
     edits: std.ArrayList(Edit),
     result: safe.String,
+    loop_counter: u32,
 
     const Self = @This();
 
@@ -26,6 +27,7 @@ pub const Transpiler = struct {
             .ast = null,
             .edits = std.ArrayList(Edit).empty,
             .result = safe.String.init(allocator),
+            .loop_counter = 0,
         };
     }
 
@@ -68,7 +70,19 @@ pub const Transpiler = struct {
         self.deduplicateEdits(allocator);
 
         // Apply edits in ascending order (building new string from original)
-        return try self.applyEdits(source, allocator);
+        var output = try self.applyEdits(source, allocator);
+        errdefer allocator.free(output);
+
+        // If output references safe types but lacks the import, prepend it
+        if (std.mem.indexOf(u8, output, "safe.") != null and
+            std.mem.indexOf(u8, output, "@import(\"safe\")") == null)
+        {
+            const with_import = try std.fmt.allocPrint(allocator, "const safe = @import(\"safe\");\n{s}", .{output});
+            allocator.free(output);
+            output = with_import;
+        }
+
+        return output;
     }
 
     fn collectEdits(self: *Self) !void {
@@ -667,48 +681,17 @@ pub const Transpiler = struct {
         if (tag == .@"for" or tag == .for_simple) {
             const for_info = if (tag == .@"for") ast.forFull(node) else ast.forSimple(node);
 
-            // Issue 2: pointer capture → index-based loop
+            // Issue 2: pointer capture — add comment, skip rewrite (too fragile)
             if (for_info.ast.inputs.len == 1 and for_info.ast.else_expr == .none) {
                 const payload_token = for_info.payload_token;
                 if (ast.tokens.items(.tag)[payload_token] == .asterisk) {
-                    const capture_name = ast.tokenSlice(payload_token + 1);
-                    const input = for_info.ast.inputs[0];
-                    const input_span = ast.nodeToSpan(input);
-                    const input_text = source[input_span.start..input_span.end];
-
-                    // Compute full span of the for loop
-                    const first_tok = ast.firstToken(node);
-                    const last_tok = ast.lastToken(node);
-                    const start_pos = ast.tokens.items(.start)[first_tok];
-                    var end_pos = source.len;
-                    if (last_tok + 1 < ast.tokens.len) {
-                        end_pos = ast.tokens.items(.start)[last_tok + 1];
+                    const span = ast.nodeToSpan(node);
+                    var line_start = span.start;
+                    while (line_start > 0 and source[line_start - 1] != '\n') {
+                        line_start -= 1;
                     }
-
-                    // Get body text
-                    const body_node = for_info.ast.then_expr;
-                    const body_first = ast.firstToken(body_node);
-                    const body_last = ast.lastToken(body_node);
-                    const body_start = ast.tokens.items(.start)[body_first];
-                    var body_end = source.len;
-                    if (body_last + 1 < ast.tokens.len) {
-                        body_end = ast.tokens.items(.start)[body_last + 1];
-                    }
-                    const body_text = source[body_start..body_end];
-
-                    const lbrace = std.mem.indexOfScalar(u8, body_text, '{');
-                    const repl = if (lbrace) |idx|
-                        try std.fmt.allocPrint(self._allocator,
-                            \\for (0..{s}.len) |__zust_i| {s}
-                            \\    var {s} = &{s}[__zust_i];{s}
-                        , .{ input_text, body_text[0..idx + 1], capture_name, input_text, body_text[idx + 1..] })
-                    else
-                        try std.fmt.allocPrint(self._allocator,
-                            \\for (0..{s}.len) |__zust_i| {{ var {s} = &{s}[__zust_i]; {s} }}
-                        , .{ input_text, capture_name, input_text, body_text });
-
-                    try self.addEdit(start_pos, end_pos, repl);
-                    return;
+                    const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: for loop with pointer capture requires manual review\n", .{});
+                    try self.addEdit(line_start, line_start, repl);
                 }
             }
 
@@ -832,8 +815,19 @@ pub const Transpiler = struct {
         const while_token = ast.nodeMainToken(node);
         const while_pos = ast.tokens.items(.start)[while_token];
 
+        // Skip labeled while loops — inserting var decl before while breaks label syntax
+        if (while_token > 0 and ast.tokens.items(.tag)[while_token - 1] == .colon) {
+            return;
+        }
+
+        // Use unique counter name per loop to avoid shadowing/redeclaration
+        const counter_id = self.loop_counter;
+        self.loop_counter += 1;
+        const counter_name = try std.fmt.allocPrint(self._allocator, "__zust_loop_counter_{d}", .{counter_id});
+        defer self._allocator.free(counter_name);
+
         // Insert counter declaration before while
-        const decl_repl = try std.fmt.allocPrint(self._allocator, "var __zust_loop_counter: u64 = 0;\n    ", .{});
+        const decl_repl = try std.fmt.allocPrint(self._allocator, "var {s}: u64 = 0;\n    ", .{counter_name});
         try self.addEdit(while_pos, while_pos, decl_repl);
 
         // Insert guard inside body if it's a block
@@ -842,59 +836,26 @@ pub const Transpiler = struct {
             const lbrace_token = ast.nodeMainToken(body_expr);
             const lbrace_pos = ast.tokens.items(.start)[lbrace_token];
             if (lbrace_pos < source.len and source[lbrace_pos] == '{') {
-                const guard_repl = try std.fmt.allocPrint(self._allocator, "\n        __zust_loop_counter += 1;\n        if (__zust_loop_counter > 1_000_000) return error.InfiniteLoop;\n        ", .{});
+                const guard_repl = try std.fmt.allocPrint(self._allocator, "\n        {s} += 1;\n        if ({s} > 1_000_000) return error.InfiniteLoop;\n        ", .{ counter_name, counter_name });
                 try self.addEdit(lbrace_pos + 1, lbrace_pos + 1, guard_repl);
             }
         }
     }
 
     /// Handle optional unwrap (pattern 5)
+    /// Always adds a comment — the block rewrite is too fragile in expression contexts.
     fn handleUnwrapOptional(self: *Self, node: std.zig.Ast.Node.Index) !void {
         const ast = &self.ast.?;
         const source = self.source.slice();
         const span = ast.nodeToSpan(node);
 
-        const data = ast.nodeData(node).node_and_token;
-        const inner = data[0];
-        const inner_span = ast.nodeToSpan(inner);
-        const inner_text = source[inner_span.start..inner_span.end];
-
-        // Detect if unwrap is part of a larger expression chain (e.g., opt.?.method())
-        // or a return statement — in those cases we can't replace with a block.
-        var after_pos = span.end;
-        while (after_pos < source.len and std.ascii.isWhitespace(source[after_pos])) after_pos += 1;
-        const is_chained = after_pos < source.len and (source[after_pos] == '.' or source[after_pos] == '(');
-
-        // Also detect return context by looking backward for "return"
-        var before_pos = span.start;
-        while (before_pos > 0 and std.ascii.isWhitespace(source[before_pos - 1])) before_pos -= 1;
-        var is_return = false;
-        // before_pos is now at the first non-whitespace char before the expression
-        // (or the space after "return" if there was whitespace between them).
-        // We check for "return" ending at before_pos.
-        if (before_pos >= 6 and std.mem.eql(u8, source[before_pos - 6 .. before_pos], "return")) {
-            is_return = true;
+        // Just add a comment before the line instead of rewriting
+        var line_start = span.start;
+        while (line_start > 0 and source[line_start - 1] != '\n') {
+            line_start -= 1;
         }
-
-        if (is_chained or is_return) {
-            // Just add a comment before the line instead of rewriting
-            var line_start = span.start;
-            while (line_start > 0 and source[line_start - 1] != '\n') {
-                line_start -= 1;
-            }
-            const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: optional unwrap requires manual review\n", .{});
-            try self.addEdit(line_start, line_start, repl);
-            return;
-        }
-
-        const repl = try std.fmt.allocPrint(self._allocator,
-            \\if ({s}) |value| {{
-            \\    value
-            \\}} else {{
-            \\    return error.NullPointer;
-            \\}}
-        , .{inner_text});
-        try self.addEdit(span.start, span.end, repl);
+        const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: optional unwrap requires manual review\n", .{});
+        try self.addEdit(line_start, line_start, repl);
     }
 
     /// Handle defer statements (pattern 1: allocator.destroy, allocator.free)
@@ -984,9 +945,13 @@ pub const Transpiler = struct {
         const unsafe_builtins = &[_][]const u8{ "@ptrCast", "@alignCast", "@intToPtr", "@ptrToInt", "@bitCast" };
         for (unsafe_builtins) |name| {
             if (std.mem.eql(u8, builtin_name, name)) {
-                const original = source[span.start..span.end];
-                const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: {s} requires manual review\n    {s}", .{ name, original });
-                try self.addEdit(span.start, span.end, repl);
+                // Insert comment before the line instead of replacing mid-expression
+                var line_start = span.start;
+                while (line_start > 0 and source[line_start - 1] != '\n') {
+                    line_start -= 1;
+                }
+                const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: {s} requires manual review\n", .{ name });
+                try self.addEdit(line_start, line_start, repl);
                 break;
             }
         }
@@ -1052,12 +1017,16 @@ pub const Transpiler = struct {
         const unsafe_builtins_two = &[_][]const u8{ "@ptrCast", "@alignCast", "@intToPtr", "@ptrToInt", "@bitCast" };
         for (unsafe_builtins_two) |name| {
             if (std.mem.eql(u8, builtin_name, name)) {
-                const original = source[span.start..span.end];
+                // Insert comment before the line instead of replacing mid-expression
+                var line_start = span.start;
+                while (line_start > 0 and source[line_start - 1] != '\n') {
+                    line_start -= 1;
+                }
                 const repl = if (std.mem.eql(u8, builtin_name, "@ptrCast"))
-                    try std.fmt.allocPrint(self._allocator, "// safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed\n    {s}", .{original})
+                    try std.fmt.allocPrint(self._allocator, "// safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed\n", .{})
                 else
-                    try std.fmt.allocPrint(self._allocator, "// safe-transpile: {s} requires manual review\n    {s}", .{ name, original });
-                try self.addEdit(span.start, span.end, repl);
+                    try std.fmt.allocPrint(self._allocator, "// safe-transpile: {s} requires manual review\n", .{ name });
+                try self.addEdit(line_start, line_start, repl);
                 break;
             }
         }
@@ -1403,7 +1372,7 @@ test "pattern 5: raw optional dereference in return gets comment" {
     try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "if (opt) |value|"));
 }
 
-test "pattern 5b: raw optional dereference in non-return context → checked access" {
+test "pattern 5b: raw optional dereference gets comment" {
     const allocator = std.testing.allocator;
     const input =
         \\const std = @import("std");
@@ -1419,9 +1388,9 @@ test "pattern 5b: raw optional dereference in non-return context → checked acc
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    // In non-return context, we can safely rewrite
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "if (opt) |value|"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "return error.NullPointer"));
+    // Always add comment — block rewrite is too fragile in expression contexts
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe-transpile: optional unwrap requires manual review"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "if (opt) |value|"));
 }
 
 test "pattern 6: uninitialized var → safe.CheckedInt" {
@@ -1720,9 +1689,30 @@ test "pattern: while (true) gets iteration limit" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "var __zust_loop_counter: u64 = 0"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "__zust_loop_counter += 1"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "var __zust_loop_counter_0: u64 = 0"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "__zust_loop_counter_0 += 1"));
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "return error.InfiniteLoop"));
+}
+
+test "pattern: multiple while (true) get unique counter names" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo() void {
+        \\    while (true) { if (done) break; }
+        \\    while (true) { if (done2) break; }
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "__zust_loop_counter_0"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "__zust_loop_counter_1"));
+    // Should NOT have duplicate bare __zust_loop_counter (without _N suffix)
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "var __zust_loop_counter: u64 = 0"));
 }
 
 test "pattern: std.mem.indexOf gets comment" {
@@ -1915,7 +1905,7 @@ test "skip: *anyopaque param not converted" {
     try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "safe.Box(anyopaque)"));
 }
 
-test "issue 2: for loop with pointer capture rewritten to index-based" {
+test "issue 2: for loop with pointer capture gets comment only" {
     const allocator = std.testing.allocator;
     const input =
         \\fn foo() void {
@@ -1932,10 +1922,8 @@ test "issue 2: for loop with pointer capture rewritten to index-based" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    // Should NOT contain the raw pointer capture pattern
-    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "for (items) |*c|"));
-    // Should contain an index-based loop
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "for (0..items.len)"));
+    // Should contain a comment about pointer capture
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "for loop with pointer capture requires manual review"));
 }
 
 test "issue 3: scalar single-item pointer dereference rewritten to array index" {
