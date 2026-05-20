@@ -1,5 +1,5 @@
 # Build stage
-FROM --platform=$BUILDPLATFORM alpine:3.19 AS builder
+FROM --platform=$BUILDPLATFORM alpine:3.21 AS builder
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -29,7 +29,7 @@ COPY . .
 RUN zig build -Doptimize=ReleaseSafe
 
 # Runtime stage
-FROM alpine:3.19
+FROM alpine:3.21
 
 RUN apk add --no-cache libgcc libc6-compat
 
