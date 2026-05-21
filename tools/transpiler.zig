@@ -87,6 +87,12 @@ pub const Transpiler = struct {
         // Detect safe module alias before processing
         try self.detectSafeAlias();
 
+        // If the safe import is scoped (inside a struct/fn), skip transpilation
+        // because generated code referencing the alias would fail to compile
+        if (self.isScopedImport()) {
+            return try allocator.dupe(u8, source);
+        }
+
         // Walk AST and collect edits
         try self.collectEdits();
 
@@ -186,6 +192,21 @@ pub const Transpiler = struct {
 
             search_pos = import_pos + 1;
         }
+    }
+
+    /// Check if the safe import is inside a struct/scope (not at top-level).
+    /// If so, generated code referencing the alias will fail to compile.
+    fn isScopedImport(self: *Self) bool {
+        const source = self.source.slice();
+        // Find the import position
+        const import_pos = std.mem.indexOf(u8, source, "@import(\"safe\")") orelse return false;
+        // Count braces before the import — if unbalanced, import is inside a block
+        var brace_depth: i32 = 0;
+        for (source[0..import_pos]) |c| {
+            if (c == '{') brace_depth += 1;
+            if (c == '}') brace_depth -= 1;
+        }
+        return brace_depth > 0;
     }
 
     fn safePrefix(self: *Self) []const u8 {
@@ -505,17 +526,18 @@ pub const Transpiler = struct {
             try self.addEdit(span.start, span.end, repl);
         }
 
-        // Pattern: std.heap.page_allocator → {s}.Pool
-        if (std.mem.eql(u8, text, "std.heap.page_allocator")) {
-            const repl = try std.fmt.allocPrint(self._allocator, "{s}.Pool", .{self.safe_alias});
-            try self.addEdit(span.start, span.end, repl);
-        }
+        // DISABLED: std.heap.page_allocator → safe.Pool
+        // safe.Pool is NOT compatible with std.mem.Allocator — different type entirely.
+        // if (std.mem.eql(u8, text, "std.heap.page_allocator")) {
+        //     const repl = try std.fmt.allocPrint(self._allocator, "{s}.Pool", .{self.safe_alias});
+        //     try self.addEdit(span.start, span.end, repl);
+        // }
 
-        // Pattern: std.heap.raw_c_allocator → {s}.Pool
-        if (std.mem.eql(u8, text, "std.heap.raw_c_allocator")) {
-            const repl = try std.fmt.allocPrint(self._allocator, "{s}.Pool", .{self.safe_alias});
-            try self.addEdit(span.start, span.end, repl);
-        }
+        // DISABLED: std.heap.raw_c_allocator → safe.Pool
+        // if (std.mem.eql(u8, text, "std.heap.raw_c_allocator")) {
+        //     const repl = try std.fmt.allocPrint(self._allocator, "{s}.Pool", .{self.safe_alias});
+        //     try self.addEdit(span.start, span.end, repl);
+        // }
     }
 
     /// DISABLED: `ptr.* = value` → `ptr[0] = value` breaks single-item pointers (*T)
@@ -1020,8 +1042,8 @@ pub const Transpiler = struct {
             // NEW: Check if identifier is a function argument (followed by comma or closing paren)
             // When a boxed variable is passed to a function, the callee expects *T (original type),
             // so we must pass ptr.ptr instead.
-            // Also rewrite when used as statement-level expression (return, assignment RHS)
-            if (next_char == ',' or next_char == ')' or next_char == ';') {
+            // Also rewrite when used in tuple/struct literals (.{ptr}) or as statement-level expression
+            if (next_char == ',' or next_char == ')' or next_char == '}' or next_char == ';') {
                 const repl = try std.fmt.allocPrint(self._allocator, "{s}.ptr", .{ident_text});
                 try self.addEdit(ident_span.start, ident_span.end, repl);
                 continue;
