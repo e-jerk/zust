@@ -321,80 +321,143 @@ pub const Transpiler = struct {
         const fn_text = source[fn_span.start..fn_span.end];
 
         // Pattern 1: allocator.create(T) → safe.Box(T).init(allocator_name, undefined)
-        if (std.mem.eql(u8, fn_text, "create") or std.mem.endsWith(u8, fn_text, ".create")) {
+        // Only match known allocator-like receivers to avoid false positives on factory methods
+        const is_allocator_create = std.mem.endsWith(u8, fn_text, ".create") and (
+            std.mem.startsWith(u8, fn_text, "allocator.") or
+            std.mem.startsWith(u8, fn_text, "alloc.") or
+            std.mem.startsWith(u8, fn_text, "gpa.") or
+            std.mem.startsWith(u8, fn_text, "arena.") or
+            std.mem.startsWith(u8, fn_text, "heap.") or
+            std.mem.endsWith(u8, fn_text, "_allocator.create") or
+            std.mem.endsWith(u8, fn_text, "_alloc.create")
+        );
+        if (is_allocator_create) {
             if (call.ast.params.len == 1) {
                 const type_node = call.ast.params[0];
                 const type_span = ast.nodeToSpan(type_node);
                 const type_text = source[type_span.start..type_span.end];
 
-                const call_span = ast.nodeToSpan(node);
-                // Extract allocator name from receiver (e.g., "allocator.create" → "allocator")
-                var alloc_name: []const u8 = "allocator";
-                if (std.mem.endsWith(u8, fn_text, ".create")) {
-                    alloc_name = fn_text[0 .. fn_text.len - ".create".len];
+                // Skip array types: [N]T or *[N]T cannot be safely boxed
+                if (std.mem.startsWith(u8, type_text, "[") or std.mem.startsWith(u8, type_text, "*[")) {
+                    // Array types should not be boxed
+                } else {
+                    const call_span = ast.nodeToSpan(node);
+                    
+                    // Check if this call is the init of a var_decl with explicit pointer type (*T or ?*T)
+                    // If so, skip because the variable expects *T, not Box(T)
+                    var has_explicit_ptr_type = false;
+                    for (0..ast.nodes.len) |j| {
+                        const decl_node: std.zig.Ast.Node.Index = @enumFromInt(j);
+                        const decl_tag = ast.nodeTag(decl_node);
+                        if (decl_tag != .simple_var_decl and decl_tag != .local_var_decl and
+                            decl_tag != .global_var_decl and decl_tag != .aligned_var_decl) continue;
+                        const vd2 = ast.fullVarDecl(decl_node) orelse continue;
+                        if (vd2.ast.init_node == .none) continue;
+                        // Check if init_node matches our call node (unwrapping try/catch)
+                        const d_init = vd2.ast.init_node.unwrap().?;
+                        const d_tag = ast.nodeTag(d_init);
+                        if (d_tag == .@"try" or d_tag == .@"catch") {
+                            const init_span = ast.nodeToSpan(d_init);
+                            if (init_span.start <= call_span.start and init_span.end >= call_span.end) {
+                                if (vd2.ast.type_node != .none) {
+                                    const type_node2 = vd2.ast.type_node.unwrap().?;
+                                    const type_span2 = ast.nodeToSpan(type_node2);
+                                    const type_text2 = source[type_span2.start..type_span2.end];
+                                    if (std.mem.startsWith(u8, type_text2, "*") or std.mem.startsWith(u8, type_text2, "?*")) {
+                                        has_explicit_ptr_type = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        } else if (d_init == node) {
+                            if (vd2.ast.type_node != .none) {
+                                const type_node2 = vd2.ast.type_node.unwrap().?;
+                                const type_span2 = ast.nodeToSpan(type_node2);
+                                const type_text2 = source[type_span2.start..type_span2.end];
+                                if (std.mem.startsWith(u8, type_text2, "*") or std.mem.startsWith(u8, type_text2, "?*")) {
+                                    has_explicit_ptr_type = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Check if this call is inside a field assignment (e.g., this.field = bun.handleOom(allocator.create(T)))
+                    // or assigned to a variable with explicit pointer type (e.g., instance = allocator.create(T) where instance: *T)
+                    // by scanning for assign nodes whose RHS span contains our call.
+                    var is_field_assignment = false;
+                    var is_ptr_var_assignment = false;
+                    for (0..ast.nodes.len) |j| {
+                        const assign_node: std.zig.Ast.Node.Index = @enumFromInt(j);
+                        const assign_tag = ast.nodeTag(assign_node);
+                        if (assign_tag != .assign) continue;
+                        const assign_data = ast.nodeData(assign_node);
+                        const lhs = assign_data.node_and_node[0];
+                        const rhs = assign_data.node_and_node[1];
+                        const rhs_span = ast.nodeToSpan(rhs);
+                        if (call_span.start >= rhs_span.start and call_span.end <= rhs_span.end) {
+                            // Our call is inside the RHS of this assignment
+                            const lhs_tag = ast.nodeTag(lhs);
+                            if (lhs_tag == .field_access) {
+                                is_field_assignment = true;
+                                break;
+                            }
+                            // Also check for nested field access through deref/index
+                            if (lhs_tag == .deref or lhs_tag == .array_access or lhs_tag == .unwrap_optional) {
+                                // e.g., this.field.* = ..., this.field[0] = ...
+                                const lhs_inner = ast.nodeData(lhs).node;
+                                if (ast.nodeTag(lhs_inner) == .field_access) {
+                                    is_field_assignment = true;
+                                    break;
+                                }
+                            }
+                            // Check if LHS is an identifier assigned to a variable with explicit *T type
+                            if (lhs_tag == .identifier) {
+                                const lhs_tok = ast.nodeMainToken(lhs);
+                                const lhs_name = ast.tokenSlice(lhs_tok);
+                                // Look up var_decl with this name
+                                for (0..ast.nodes.len) |k| {
+                                    const decl_node2: std.zig.Ast.Node.Index = @enumFromInt(k);
+                                    const decl_tag2 = ast.nodeTag(decl_node2);
+                                    if (decl_tag2 != .simple_var_decl and decl_tag2 != .local_var_decl and
+                                        decl_tag2 != .global_var_decl and decl_tag2 != .aligned_var_decl) continue;
+                                    const vd3 = ast.fullVarDecl(decl_node2) orelse continue;
+                                    const decl_main_tok = ast.nodeMainToken(decl_node2);
+                                    const decl_name_tok = decl_main_tok + 1;
+                                    if (decl_name_tok >= ast.tokens.len) continue;
+                                    const decl_name = ast.tokenSlice(decl_name_tok);
+                                    if (std.mem.eql(u8, decl_name, lhs_name)) {
+                                        if (vd3.ast.type_node != .none) {
+                                            const type_node3 = vd3.ast.type_node.unwrap().?;
+                                            const type_span3 = ast.nodeToSpan(type_node3);
+                                            const type_text3 = source[type_span3.start..type_span3.end];
+                                            if (std.mem.startsWith(u8, type_text3, "*") or std.mem.startsWith(u8, type_text3, "?*")) {
+                                                is_ptr_var_assignment = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                if (is_ptr_var_assignment) break;
+                            }
+                        }
+                    }
+                    
+                    if (!has_explicit_ptr_type and !is_field_assignment and !is_ptr_var_assignment) {
+                        // Extract allocator name from receiver (e.g., "allocator.create" → "allocator")
+                        const alloc_name = fn_text[0 .. fn_text.len - ".create".len];
+                        const repl = try std.fmt.allocPrint(self._allocator, "{s}.Box({s}).init({s}, undefined)", .{ self.safe_alias, type_text, alloc_name });
+                        try self.addEdit(call_span.start, call_span.end, repl);
+                    }
                 }
-                const repl = try std.fmt.allocPrint(self._allocator, "{s}.Box({s}).init({s}, undefined)", .{ self.safe_alias, type_text, alloc_name });
-                try self.addEdit(call_span.start, call_span.end, repl);
             }
         }
 
-        // Pattern 2: std.ArrayList(T)
-        if (std.mem.eql(u8, fn_text, "std.ArrayList") or
-            std.mem.eql(u8, fn_text, "ArrayList"))
-        {
-            if (call.ast.params.len == 1) {
-                const type_node = call.ast.params[0];
-                const type_span = ast.nodeToSpan(type_node);
-                const type_text = source[type_span.start..type_span.end];
-
-                const call_span = ast.nodeToSpan(node);
-                const repl = try std.fmt.allocPrint(self._allocator, "{s}.ArrayList({s})", .{ self.safe_alias, type_text });
-                try self.addEdit(call_span.start, call_span.end, repl);
-            }
-        }
-
-        // Pattern 3: std.StringHashMap(T)
-        if (std.mem.eql(u8, fn_text, "std.StringHashMap") or
-            std.mem.eql(u8, fn_text, "StringHashMap"))
-        {
-            if (call.ast.params.len == 1) {
-                const type_node = call.ast.params[0];
-                const type_span = ast.nodeToSpan(type_node);
-                const type_text = source[type_span.start..type_span.end];
-
-                const call_span = ast.nodeToSpan(node);
-                const repl = try std.fmt.allocPrint(self._allocator, "{s}.HashMap({s}.String, {s})", .{ self.safe_alias, self.safe_alias, type_text });
-                try self.addEdit(call_span.start, call_span.end, repl);
-            }
-        }
-
-        // Pattern: std.mem.eql → safe.SimdUtils.eql
-        // std.mem.eql(u8, a, b) → safe.SimdUtils.eql(a, b)  (drop type arg)
-        if (std.mem.eql(u8, fn_text, "std.mem.eql") or std.mem.eql(u8, fn_text, "mem.eql")) {
-            if (call.ast.params.len >= 3) {
-                const a_span = ast.nodeToSpan(call.ast.params[1]);
-                const b_span = ast.nodeToSpan(call.ast.params[2]);
-                const a_text = source[a_span.start..a_span.end];
-                const b_text = source[b_span.start..b_span.end];
-                const call_span = ast.nodeToSpan(node);
-                const repl = try std.fmt.allocPrint(self._allocator, "{s}.SimdUtils.eql({s}, {s})", .{ self.safe_alias, a_text, b_text });
-                try self.addEdit(call_span.start, call_span.end, repl);
-            }
-        }
-
-        // Pattern: std.mem.copy → safe.SimdUtils.copy
-        // std.mem.copy(u8, dest, src) → safe.SimdUtils.copy(dest, src)  (drop type arg)
-        if (std.mem.eql(u8, fn_text, "std.mem.copy") or std.mem.eql(u8, fn_text, "mem.copy")) {
-            if (call.ast.params.len >= 3) {
-                const dest_span = ast.nodeToSpan(call.ast.params[1]);
-                const src_span = ast.nodeToSpan(call.ast.params[2]);
-                const dest_text = source[dest_span.start..dest_span.end];
-                const src_text = source[src_span.start..src_span.end];
-                const call_span = ast.nodeToSpan(node);
-                const repl = try std.fmt.allocPrint(self._allocator, "{s}.SimdUtils.copy({s}, {s})", .{ self.safe_alias, dest_text, src_text });
-                try self.addEdit(call_span.start, call_span.end, repl);
-            }
-        }
+        // DISABLED patterns that cause cross-file type mismatches:
+        // std.ArrayList(T) → safe.ArrayList(T) (different method signatures)
+        // std.StringHashMap(T) → safe.HashMap(...) (different type)
+        // std.mem.eql → safe.SimdUtils.eql (drops type arg)
+        // std.mem.copy → safe.SimdUtils.copy (drops type arg)
 
         // Pattern: std.mem.indexOf → comment
         if (std.mem.eql(u8, fn_text, "std.mem.indexOf") or std.mem.eql(u8, fn_text, "mem.indexOf")) {
@@ -561,6 +624,8 @@ pub const Transpiler = struct {
         }
         self.boxed_vars.clearRetainingCapacity();
 
+
+
         // Get body span
         const body_first = ast.firstToken(body_node);
         const body_last = ast.lastToken(body_node);
@@ -604,19 +669,83 @@ pub const Transpiler = struct {
 
             if (init_tag != .call and init_tag != .call_one) continue;
 
-            // Check if the call is allocator.create
-            var buf: [1]std.zig.Ast.Node.Index = undefined;
-            const call_info = switch (init_tag) {
-                .call => ast.callFull(init_node),
-                .call_one => ast.callOne(&buf, init_node),
-                else => continue,
-            };
-            const fn_expr = call_info.ast.fn_expr;
-            const fn_span = ast.nodeToSpan(fn_expr);
-            const fn_text = source[fn_span.start..fn_span.end];
-            const is_create = std.mem.eql(u8, fn_text, "create") or
-                std.mem.endsWith(u8, fn_text, ".create");
-            if (!is_create) continue;
+            // Check if the call is allocator.create (strict: only known allocator-like names)
+            // Also look inside call arguments for nested allocator.create (e.g. bun.handleOom(allocator.create(T)))
+            var is_allocator_create = false;
+            var is_box_init = false;
+
+            // Recursive helper to find allocator.create in call tree
+            var nodes_to_check = std.ArrayList(std.zig.Ast.Node.Index).empty;
+            defer nodes_to_check.deinit(self._allocator);
+            try nodes_to_check.append(self._allocator, init_node);
+
+            var idx: usize = 0;
+            while (idx < nodes_to_check.items.len) : (idx += 1) {
+                const check_node = nodes_to_check.items[idx];
+                const check_tag = ast.nodeTag(check_node);
+
+                // Unwrap try/catch
+                var unwrapped = check_node;
+                var unwrapped_tag = check_tag;
+                if (unwrapped_tag == .@"try") {
+                    unwrapped = ast.nodeData(unwrapped).node;
+                    unwrapped_tag = ast.nodeTag(unwrapped);
+                }
+                if (unwrapped_tag == .@"catch") {
+                    unwrapped = ast.nodeData(unwrapped).node_and_node[0];
+                    unwrapped_tag = ast.nodeTag(unwrapped);
+                }
+
+                if (unwrapped_tag != .call and unwrapped_tag != .call_one) continue;
+
+                var buf2: [1]std.zig.Ast.Node.Index = undefined;
+                const call_info2 = switch (unwrapped_tag) {
+                    .call => ast.callFull(unwrapped),
+                    .call_one => ast.callOne(&buf2, unwrapped),
+                    else => continue,
+                };
+                const fn_expr2 = call_info2.ast.fn_expr;
+                const fn_span2 = ast.nodeToSpan(fn_expr2);
+                const fn_text2 = source[fn_span2.start..fn_span2.end];
+
+                if (std.mem.endsWith(u8, fn_text2, ".create") and (
+                    std.mem.startsWith(u8, fn_text2, "allocator.") or
+                    std.mem.startsWith(u8, fn_text2, "alloc.") or
+                    std.mem.startsWith(u8, fn_text2, "gpa.") or
+                    std.mem.startsWith(u8, fn_text2, "arena.") or
+                    std.mem.startsWith(u8, fn_text2, "heap.") or
+                    std.mem.endsWith(u8, fn_text2, "_allocator.create") or
+                    std.mem.endsWith(u8, fn_text2, "_alloc.create")
+                )) {
+                    is_allocator_create = true;
+                    break;
+                }
+
+                if (call_info2.ast.params.len == 2 and
+                    std.mem.indexOf(u8, fn_text2, ".Box(") != null and
+                    std.mem.endsWith(u8, fn_text2, ").init")) {
+                    is_box_init = true;
+                    break;
+                }
+
+                // Add call arguments to queue for recursive checking
+                for (call_info2.ast.params) |param| {
+                    try nodes_to_check.append(self._allocator, param);
+                }
+            }
+
+            if (!is_allocator_create and !is_box_init) continue;
+
+            // NEW: If variable has explicit pointer type (*T or ?*T), skip adding to boxed_vars
+            // because handleCall will skip converting the .create, so we must not rewrite usages
+            if (vd.ast.type_node != .none) {
+                const type_node = vd.ast.type_node.unwrap().?;
+                const type_span = ast.nodeToSpan(type_node);
+                const type_text = source[type_span.start..type_span.end];
+                if (std.mem.startsWith(u8, type_text, "*") or std.mem.startsWith(u8, type_text, "?*")) {
+                    continue;
+                }
+            }
 
             // Extract variable name from declaration
             const main_tok = ast.nodeMainToken(node);
@@ -631,6 +760,163 @@ pub const Transpiler = struct {
 
         if (self.boxed_vars.items.len == 0) return;
 
+        // Phase 1b: Collect ALL var_decl names in body, tracking which are
+        // Box declarations vs non-Box. Only disable tracking for names that
+        // have BOTH Box and non-Box declarations (true shadowing).
+        var boxed_decl_counts = std.StringHashMap(u32).init(self._allocator);
+        defer {
+            var it = boxed_decl_counts.keyIterator();
+            while (it.next()) |key| {
+                self._allocator.free(key.*);
+            }
+            boxed_decl_counts.deinit();
+        }
+        var all_decl_counts = std.StringHashMap(u32).init(self._allocator);
+        defer {
+            var it = all_decl_counts.keyIterator();
+            while (it.next()) |key| {
+                self._allocator.free(key.*);
+            }
+            all_decl_counts.deinit();
+        }
+
+        for (0..ast.nodes.len) |j| {
+            const decl_node: std.zig.Ast.Node.Index = @enumFromInt(j);
+            const decl_tag = ast.nodeTag(decl_node);
+            if (decl_tag != .simple_var_decl and decl_tag != .local_var_decl and
+                decl_tag != .global_var_decl and decl_tag != .aligned_var_decl) continue;
+            const decl_span = ast.nodeToSpan(decl_node);
+            if (decl_span.start < body_start or decl_span.end > body_end) continue;
+            const decl_main_tok = ast.nodeMainToken(decl_node);
+            const decl_name_tok = decl_main_tok + 1;
+            if (decl_name_tok >= ast.tokens.len) continue;
+            const decl_name = ast.tokenSlice(decl_name_tok);
+
+            // Count in all declarations
+            const all_gop = all_decl_counts.getOrPut(decl_name) catch continue;
+            if (!all_gop.found_existing) {
+                all_gop.key_ptr.* = self._allocator.dupe(u8, decl_name) catch continue;
+                all_gop.value_ptr.* = 0;
+            }
+            all_gop.value_ptr.* += 1;
+
+            // Check if this declaration is a Box pattern
+            const decl_vd = ast.fullVarDecl(decl_node) orelse continue;
+            if (decl_vd.ast.init_node != .none) {
+                var d_init = decl_vd.ast.init_node.unwrap().?;
+                var d_tag = ast.nodeTag(d_init);
+                if (d_tag == .@"try") {
+                    d_init = ast.nodeData(d_init).node;
+                    d_tag = ast.nodeTag(d_init);
+                }
+                if (d_tag == .@"catch") {
+                    d_init = ast.nodeData(d_init).node_and_node[0];
+                    d_tag = ast.nodeTag(d_init);
+                }
+
+                // Recursive check for Box patterns in call tree (same as Phase 1a)
+                var d_is_box = false;
+                var d_nodes_to_check = std.ArrayList(std.zig.Ast.Node.Index).empty;
+                defer d_nodes_to_check.deinit(self._allocator);
+                try d_nodes_to_check.append(self._allocator, d_init);
+
+                var d_idx: usize = 0;
+                while (d_idx < d_nodes_to_check.items.len) : (d_idx += 1) {
+                    const d_check = d_nodes_to_check.items[d_idx];
+                    var d_check_tag = ast.nodeTag(d_check);
+
+                    if (d_check_tag == .@"try") {
+                        d_check_tag = ast.nodeTag(ast.nodeData(d_check).node);
+                    }
+                    if (d_check_tag == .@"catch") {
+                        d_check_tag = ast.nodeTag(ast.nodeData(d_check).node_and_node[0]);
+                    }
+
+                    if (d_check_tag != .call and d_check_tag != .call_one) continue;
+
+                    var d_buf: [1]std.zig.Ast.Node.Index = undefined;
+                    const d_call = switch (d_check_tag) {
+                        .call => ast.callFull(d_check),
+                        .call_one => ast.callOne(&d_buf, d_check),
+                        else => continue,
+                    };
+                    const d_fn_expr = d_call.ast.fn_expr;
+                    const d_fn_span = ast.nodeToSpan(d_fn_expr);
+                    const d_fn_text = source[d_fn_span.start..d_fn_span.end];
+                    if (std.mem.endsWith(u8, d_fn_text, ".create") and (
+                        std.mem.startsWith(u8, d_fn_text, "allocator.") or
+                        std.mem.startsWith(u8, d_fn_text, "alloc.") or
+                        std.mem.startsWith(u8, d_fn_text, "gpa.") or
+                        std.mem.startsWith(u8, d_fn_text, "arena.") or
+                        std.mem.startsWith(u8, d_fn_text, "heap.") or
+                        std.mem.endsWith(u8, d_fn_text, "_allocator.create") or
+                        std.mem.endsWith(u8, d_fn_text, "_alloc.create")
+                    )) {
+                        d_is_box = true;
+                        break;
+                    }
+                    if (d_call.ast.params.len == 2 and
+                        std.mem.indexOf(u8, d_fn_text, ".Box(") != null and
+                        std.mem.endsWith(u8, d_fn_text, ").init")) {
+                        d_is_box = true;
+                        break;
+                    }
+                    for (d_call.ast.params) |param| {
+                        try d_nodes_to_check.append(self._allocator, param);
+                    }
+                }
+
+                if (d_is_box) {
+                    const box_gop = boxed_decl_counts.getOrPut(decl_name) catch continue;
+                    if (!box_gop.found_existing) {
+                        box_gop.key_ptr.* = self._allocator.dupe(u8, decl_name) catch continue;
+                        box_gop.value_ptr.* = 0;
+                    }
+                    box_gop.value_ptr.* += 1;
+                }
+            }
+        }
+
+        // Remove boxed vars that are truly shadowed: name appears in both
+        // Box and non-Box declarations
+        {
+            var i: usize = 0;
+            while (i < self.boxed_vars.items.len) {
+                const name = self.boxed_vars.items[i];
+                const all_count = all_decl_counts.get(name) orelse 1;
+                const box_count = boxed_decl_counts.get(name) orelse 0;
+                if (all_count > box_count) {
+                    // There are non-Box declarations with this name — shadowed
+                    self._allocator.free(name);
+                    _ = self.boxed_vars.swapRemove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        if (self.boxed_vars.items.len == 0) return;
+
+        // Collect spans of nested fn_decl bodies to avoid cross-function rewrites
+        var nested_fn_bodies = std.ArrayList(std.meta.Tuple(&.{ usize, usize })).empty;
+        defer nested_fn_bodies.deinit(self._allocator);
+        for (0..ast.nodes.len) |j| {
+            const maybe_fn: std.zig.Ast.Node.Index = @enumFromInt(j);
+            if (ast.nodeTag(maybe_fn) != .fn_decl) continue;
+            const fn_data = ast.nodeData(maybe_fn).node_and_node;
+            const fn_body = fn_data[1];
+            const fn_body_first = ast.firstToken(fn_body);
+            const fn_body_last = ast.lastToken(fn_body);
+            const fn_body_start = ast.tokens.items(.start)[fn_body_first];
+            var fn_body_end = source.len;
+            if (fn_body_last + 1 < ast.tokens.len) {
+                fn_body_end = ast.tokens.items(.start)[fn_body_last + 1];
+            }
+            // Only count as nested if it's strictly inside our body and not identical
+            if (fn_body_start > body_start and fn_body_end < body_end) {
+                try nested_fn_bodies.append(self._allocator, .{ fn_body_start, fn_body_end });
+            }
+        }
+
         // Phase 2: Rewrite all identifier usages of boxed vars in body
         for (0..ast.nodes.len) |i| {
             const node_idx: std.zig.Ast.Node.Index = @enumFromInt(i);
@@ -639,11 +925,20 @@ pub const Transpiler = struct {
 
             const token_idx = ast.nodeMainToken(node_idx);
             const ident_span = ast.tokenToSpan(token_idx);
+            const ident_text = ast.tokenSlice(token_idx);
 
             // Skip identifiers outside the body
             if (ident_span.start < body_start or ident_span.end > body_end) continue;
 
-            const ident_text = ast.tokenSlice(token_idx);
+            // Skip identifiers inside nested function bodies
+            var in_nested_fn = false;
+            for (nested_fn_bodies.items) |span| {
+                if (ident_span.start >= span[0] and ident_span.end <= span[1]) {
+                    in_nested_fn = true;
+                    break;
+                }
+            }
+            if (in_nested_fn) continue;
 
             // Check if this identifier is a boxed variable
             var is_boxed = false;
@@ -721,6 +1016,16 @@ pub const Transpiler = struct {
                 try self.addEdit(ident_span.start, ident_span.end, repl);
                 continue;
             }
+
+            // NEW: Check if identifier is a function argument (followed by comma or closing paren)
+            // When a boxed variable is passed to a function, the callee expects *T (original type),
+            // so we must pass ptr.ptr instead.
+            // Also rewrite when used as statement-level expression (return, assignment RHS)
+            if (next_char == ',' or next_char == ')' or next_char == ';') {
+                const repl = try std.fmt.allocPrint(self._allocator, "{s}.ptr", .{ident_text});
+                try self.addEdit(ident_span.start, ident_span.end, repl);
+                continue;
+            }
         }
 
         // Phase 3: Rewrite allocator.destroy(boxed_var) → _ = boxed_var.deinit()
@@ -766,6 +1071,16 @@ pub const Transpiler = struct {
             // Check call is inside body
             const call_span = ast.nodeToSpan(call_node);
             if (call_span.start < body_start or call_span.end > body_end) continue;
+
+            // Skip destroy calls inside nested function bodies
+            var call_in_nested_fn = false;
+            for (nested_fn_bodies.items) |span| {
+                if (call_span.start >= span[0] and call_span.end <= span[1]) {
+                    call_in_nested_fn = true;
+                    break;
+                }
+            }
+            if (call_in_nested_fn) continue;
 
             // Rewrite: allocator.destroy(ptr) → _ = ptr.deinit()
             const repl = try std.fmt.allocPrint(self._allocator, "_ = {s}.deinit()", .{param_name});
@@ -879,16 +1194,12 @@ pub const Transpiler = struct {
             }
         }
 
-        // Rewrite []u8 and []const u8 type annotations to safe.Slice(u8)
+        // DISABLED: []u8 → safe.Slice(u8) causes cross-file type mismatches
+        // safe.Slice(u8) is NOT compatible with []u8 / []const u8 in Zig's type system.
         if (vd.ast.type_node != .none) {
             const type_node: std.zig.Ast.Node.Index = vd.ast.type_node.unwrap().?;
             const type_span = ast.nodeToSpan(type_node);
             const type_text = source[type_span.start..type_span.end];
-
-            if (std.mem.eql(u8, type_text, "[]u8") or std.mem.eql(u8, type_text, "[]const u8")) {
-                const repl = try std.fmt.allocPrint(self._allocator, "{s}.Slice(u8)", .{self.safe_alias});
-                try self.addEdit(type_span.start, type_span.end, repl);
-            }
 
             if (vd.ast.init_node == .none) {
                 const after_type = type_span.end;
@@ -898,12 +1209,26 @@ pub const Transpiler = struct {
                 while (next_pos < source.len and std.ascii.isWhitespace(source[next_pos])) next_pos += 1;
                 if (next_pos < source.len and source[next_pos] == ',') {
                     // Part of tuple destructuring — do not add initializer
-                } else if (isIntType(type_text)) {
-                    const repl = try std.fmt.allocPrint(self._allocator, " = {s}.CheckedInt({s}).init(0)", .{ self.safe_alias, type_text });
-                    try self.addEdit(after_type, after_type, repl);
                 } else {
-                    const repl = try std.fmt.allocPrint(self._allocator, " = undefined", .{});
-                    try self.addEdit(after_type, after_type, repl);
+                    // Also skip if there's an `=` later on the same line (tuple init)
+                    var line_has_equals = false;
+                    var check_pos = after_type;
+                    while (check_pos < source.len and source[check_pos] != '\n') {
+                        if (source[check_pos] == '=') {
+                            line_has_equals = true;
+                            break;
+                        }
+                        check_pos += 1;
+                    }
+                    if (line_has_equals) {
+                        // Tuple destructuring with `=` on same line — do not add initializer
+                    } else if (isIntType(type_text)) {
+                        const repl = try std.fmt.allocPrint(self._allocator, " = {s}.CheckedInt({s}).init(0)", .{ self.safe_alias, type_text });
+                        try self.addEdit(after_type, after_type, repl);
+                    } else {
+                        const repl = try std.fmt.allocPrint(self._allocator, " = undefined", .{});
+                        try self.addEdit(after_type, after_type, repl);
+                    }
                 }
             } else {
                 // Issue 1 & 9: Replace `= undefined` for arrays and C-structs
@@ -1127,8 +1452,69 @@ pub const Transpiler = struct {
             const defer_span = ast.nodeToSpan(node);
 
             if (info.is_destroy) {
-                const repl = try std.fmt.allocPrint(self._allocator, "defer _ = {s}.deinit()", .{info.param.?});
-                try self.addEdit(defer_span.start, defer_span.end, repl);
+                const param_name = info.param.?;
+                // Only convert destroy to deinit if the variable was created via allocator.create
+                // AND does not have explicit pointer type (which means the .create was converted to Box)
+                var is_boxed_var = false;
+                for (0..ast.nodes.len) |j| {
+                    const decl_node: std.zig.Ast.Node.Index = @enumFromInt(j);
+                    const decl_tag = ast.nodeTag(decl_node);
+                    if (decl_tag != .simple_var_decl and decl_tag != .local_var_decl and
+                        decl_tag != .global_var_decl and decl_tag != .aligned_var_decl) continue;
+                    const vd = ast.fullVarDecl(decl_node) orelse continue;
+                    const decl_main_tok = ast.nodeMainToken(decl_node);
+                    const decl_name_tok = decl_main_tok + 1;
+                    if (decl_name_tok >= ast.tokens.len) continue;
+                    const decl_name = ast.tokenSlice(decl_name_tok);
+                    if (!std.mem.eql(u8, decl_name, param_name)) continue;
+                    if (vd.ast.init_node == .none) continue;
+                    // Check if init contains allocator.create
+                    const d_init = vd.ast.init_node.unwrap().?;
+                    const d_tag = ast.nodeTag(d_init);
+                    if (d_tag == .@"try" or d_tag == .@"catch") {
+                        const init_span = ast.nodeToSpan(d_init);
+                        const init_text = source[init_span.start..init_span.end];
+                        if (std.mem.indexOf(u8, init_text, ".create(") != null) {
+                            is_boxed_var = true;
+                        }
+                    } else if (d_tag == .call or d_tag == .call_one) {
+                        var buf: [1]std.zig.Ast.Node.Index = undefined;
+                        const call_info = switch (d_tag) {
+                            .call => ast.callFull(d_init),
+                            .call_one => ast.callOne(&buf, d_init),
+                            else => continue,
+                        };
+                        const fn_expr = call_info.ast.fn_expr;
+                        const fn_span = ast.nodeToSpan(fn_expr);
+                        const fn_text = source[fn_span.start..fn_span.end];
+                        if (std.mem.endsWith(u8, fn_text, ".create") and (
+                            std.mem.startsWith(u8, fn_text, "allocator.") or
+                            std.mem.startsWith(u8, fn_text, "alloc.") or
+                            std.mem.startsWith(u8, fn_text, "gpa.") or
+                            std.mem.startsWith(u8, fn_text, "arena.") or
+                            std.mem.startsWith(u8, fn_text, "heap.") or
+                            std.mem.endsWith(u8, fn_text, "_allocator.create") or
+                            std.mem.endsWith(u8, fn_text, "_alloc.create")
+                        )) {
+                            is_boxed_var = true;
+                        }
+                    }
+                    // If variable has explicit pointer type, the .create was NOT converted to Box,
+                    // so we should NOT convert the destroy either
+                    if (is_boxed_var and vd.ast.type_node != .none) {
+                        const type_node = vd.ast.type_node.unwrap().?;
+                        const type_span = ast.nodeToSpan(type_node);
+                        const type_text = source[type_span.start..type_span.end];
+                        if (std.mem.startsWith(u8, type_text, "*") or std.mem.startsWith(u8, type_text, "?*")) {
+                            is_boxed_var = false;
+                        }
+                    }
+                    if (is_boxed_var) break;
+                }
+                if (is_boxed_var) {
+                    const repl = try std.fmt.allocPrint(self._allocator, "defer _ = {s}.deinit()", .{param_name});
+                    try self.addEdit(defer_span.start, defer_span.end, repl);
+                }
                 return;
             }
             // DISABLED: defer allocator.free removal causes unused capture/parameter errors
@@ -1181,18 +1567,16 @@ pub const Transpiler = struct {
         const builtin_name = ast.tokenSlice(main_token);
         const span = ast.nodeToSpan(node);
 
-        // @memcpy(dest, src) → safe.SimdUtils.copy(dest, src)
+        // DISABLED: @memcpy → safe.SimdUtils.copy causes cross-file type mismatches
+        // @memcpy has different semantics than safe.SimdUtils.copy.
         if (std.mem.eql(u8, builtin_name, "@memcpy")) {
-            var buffer: [2]std.zig.Ast.Node.Index = undefined;
-            const args = ast.builtinCallParams(&buffer, node).?;
-            if (args.len >= 2) {
-                const dest_span = ast.nodeToSpan(args[0]);
-                const src_span = ast.nodeToSpan(args[1]);
-                const dest_text = source[dest_span.start..dest_span.end];
-                const src_text = source[src_span.start..src_span.end];
-                const repl = try std.fmt.allocPrint(self._allocator, "{s}.SimdUtils.copy({s}, {s})", .{ self.safe_alias, dest_text, src_text });
-                try self.addEdit(span.start, span.end, repl);
+            // Add comment only, keep original builtin
+            var line_start = span.start;
+            while (line_start > 0 and source[line_start - 1] != '\n') {
+                line_start -= 1;
             }
+            const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: @memcpy requires manual review\n", .{});
+            try self.addComment(line_start, repl);
             return;
         }
 
@@ -1411,6 +1795,9 @@ fn isAllocatorMethod(fn_text: []const u8, method: []const u8) bool {
     for (alloc_names) |name| {
         if (std.mem.eql(u8, prefix, name)) return true;
     }
+    // Also accept names ending with _allocator or _alloc, or compound names like bun.default_allocator
+    if (std.mem.endsWith(u8, prefix, "_allocator") or std.mem.endsWith(u8, prefix, "_alloc")) return true;
+    if (std.mem.indexOf(u8, prefix, "allocator")) |_| return true;
     return false;
 }
 
@@ -1528,7 +1915,7 @@ test "pattern 1: allocator.create/destroy → safe.Box" {
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "defer _ = ptr.deinit()"));
 }
 
-test "pattern 2: std.ArrayList → safe.ArrayList" {
+test "pattern 2: std.ArrayList NOT converted (disabled for coverage)" {
     const allocator = std.testing.allocator;
     const input =
         \\const std = @import("std");
@@ -1546,10 +1933,11 @@ test "pattern 2: std.ArrayList → safe.ArrayList" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.ArrayList(i32)"));
+    // std.ArrayList conversion disabled to prevent cross-file type mismatches
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "std.ArrayList(i32)"));
 }
 
-test "pattern 3: std.StringHashMap → safe.HashMap" {
+test "pattern 3: std.StringHashMap NOT converted (disabled for coverage)" {
     const allocator = std.testing.allocator;
     const input =
         \\const std = @import("std");
@@ -1566,7 +1954,8 @@ test "pattern 3: std.StringHashMap → safe.HashMap" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.HashMap(safe.String, i32)"));
+    // std.StringHashMap conversion disabled to prevent cross-file type mismatches
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "std.StringHashMap(i32)"));
 }
 
 test "pattern 5: raw optional dereference in return gets NO comment" {
@@ -1685,7 +2074,7 @@ test "transpiler dog-food: safe types prevent leaks" {
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.CheckedInt(i32).init(0)"));
 }
 
-test "pattern: []u8 type → safe.Slice(u8)" {
+test "pattern: []u8 type NOT converted (disabled for coverage)" {
     const allocator = std.testing.allocator;
     const input =
         \\fn foo() void {
@@ -1700,10 +2089,11 @@ test "pattern: []u8 type → safe.Slice(u8)" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.Slice(u8)"));
+    // safe.Slice conversion disabled to prevent cross-file type mismatches
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "[]u8"));
 }
 
-test "pattern: []const u8 type → safe.Slice(u8)" {
+test "pattern: []const u8 type NOT converted (disabled for coverage)" {
     const allocator = std.testing.allocator;
     const input =
         \\fn foo() void {
@@ -1718,10 +2108,11 @@ test "pattern: []const u8 type → safe.Slice(u8)" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.Slice(u8)"));
+    // safe.Slice conversion disabled to prevent cross-file type mismatches
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "[]const u8"));
 }
 
-test "pattern: @memcpy → safe.SimdUtils.copy" {
+test "pattern: @memcpy gets comment only (not converted)" {
     const allocator = std.testing.allocator;
     const input =
         \\fn foo() void {
@@ -1737,10 +2128,11 @@ test "pattern: @memcpy → safe.SimdUtils.copy" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.SimdUtils.copy"));
+    // safe.SimdUtils.copy conversion disabled to prevent cross-file type mismatches
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "@memcpy"));
 }
 
-test "pattern: std.mem.eql → safe.SimdUtils.eql" {
+test "pattern: std.mem.eql NOT converted (disabled for coverage)" {
     const allocator = std.testing.allocator;
     const input =
         \\const std = @import("std");
@@ -1755,10 +2147,11 @@ test "pattern: std.mem.eql → safe.SimdUtils.eql" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.SimdUtils.eql"));
+    // std.mem.eql conversion disabled to prevent cross-file type mismatches
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "std.mem.eql"));
 }
 
-test "pattern: std.mem.copy → safe.SimdUtils.copy" {
+test "pattern: std.mem.copy NOT converted (disabled for coverage)" {
     const allocator = std.testing.allocator;
     const input =
         \\const std = @import("std");
@@ -1775,7 +2168,8 @@ test "pattern: std.mem.copy → safe.SimdUtils.copy" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.SimdUtils.copy"));
+    // std.mem.copy conversion disabled to prevent cross-file type mismatches
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "std.mem.copy"));
 }
 
 test "pattern: @intCast gets manual review comment" {
@@ -2185,7 +2579,7 @@ test "issue 4: defer destroy only rewritten for safe.Box-created pointers" {
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "defer _ = ptr.deinit()"));
 }
 
-test "issue 5: @memcpy preserves both destination and source arguments" {
+test "issue 5: @memcpy NOT converted (disabled for coverage)" {
     const allocator = std.testing.allocator;
     const input =
         \\fn foo() void {
@@ -2201,10 +2595,9 @@ test "issue 5: @memcpy preserves both destination and source arguments" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    // Should contain both arguments in safe.SimdUtils.copy call
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "safe.SimdUtils.copy"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "&b"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "&a"));
+    // @memcpy conversion disabled to prevent cross-file type mismatches
+    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "@memcpy"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "safe.SimdUtils.copy"));
 }
 
 test "issue 6: while with continue expression transpiles without crash" {
