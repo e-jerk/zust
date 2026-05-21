@@ -23,6 +23,9 @@ pub const Transpiler = struct {
     commented_lines: std.AutoHashMap(usize, void),
     file_path: ?[]const u8,
     call_graph: ?*call_graph_mod.CallGraph,
+    /// Variables in the current function body that have been converted
+    /// from `*T` to `safe.Box(T)`. Used to rewrite all usages within the body.
+    boxed_vars: std.ArrayList([]const u8),
 
     const Self = @This();
 
@@ -38,6 +41,7 @@ pub const Transpiler = struct {
             .commented_lines = std.AutoHashMap(usize, void).init(allocator),
             .file_path = null,
             .call_graph = null,
+            .boxed_vars = std.ArrayList([]const u8).empty,
         };
     }
 
@@ -59,6 +63,11 @@ pub const Transpiler = struct {
             self._allocator.free(self.safe_alias);
         }
         self.commented_lines.deinit();
+        // Clean up boxed variable names
+        for (self.boxed_vars.items) |name| {
+            self._allocator.free(name);
+        }
+        self.boxed_vars.deinit(self._allocator);
     }
 
     /// Transpile a single Zig source file.
@@ -245,6 +254,9 @@ pub const Transpiler = struct {
                     const proto = data[0];
                     const body = data[1];
                     try self.handleFnDecl(proto, body);
+                    // NEW: Scan body for allocator.create → safe.Box variables,
+                    // then rewrite all their usages in the body.
+                    try self.rewriteBoxedVarsInBody(body);
                 },
                 else => {},
             }
@@ -536,7 +548,231 @@ pub const Transpiler = struct {
         }
         
     }
-    
+
+    /// NEW: Scan function body for variables initialized with allocator.create(T),
+    /// record their names, then rewrite all their usages to use `.ptr` access.
+    fn rewriteBoxedVarsInBody(self: *Self, body_node: std.zig.Ast.Node.Index) !void {
+        const ast = &self.ast.?;
+        const source = self.source.slice();
+
+        // Clear previous function's boxed vars
+        for (self.boxed_vars.items) |name| {
+            self._allocator.free(name);
+        }
+        self.boxed_vars.clearRetainingCapacity();
+
+        // Get body span
+        const body_first = ast.firstToken(body_node);
+        const body_last = ast.lastToken(body_node);
+        const body_start = ast.tokens.items(.start)[body_first];
+        var body_end = source.len;
+        if (body_last + 1 < ast.tokens.len) {
+            body_end = ast.tokens.items(.start)[body_last + 1];
+        }
+
+        // Phase 1: Find var_decls in body whose init is allocator.create(...)
+        const tags = ast.nodes.items(.tag);
+        for (0..ast.nodes.len) |i| {
+            const node: std.zig.Ast.Node.Index = @enumFromInt(i);
+            const tag = tags[i];
+            if (tag != .simple_var_decl and tag != .local_var_decl and
+                tag != .global_var_decl and tag != .aligned_var_decl) continue;
+
+            const vd = ast.fullVarDecl(node) orelse continue;
+
+            // Check that the var decl is inside the body
+            const decl_span = ast.nodeToSpan(node);
+            if (decl_span.start < body_start or decl_span.end > body_end) continue;
+
+            if (vd.ast.init_node == .none) continue;
+            var init_node = vd.ast.init_node.unwrap().?;
+            var init_tag = ast.nodeTag(init_node);
+
+            // Unwrap `try` wrapper: `try allocator.create(T)` — init is `.try`, child is `.call`
+            if (init_tag == .@"try") {
+                const try_data = ast.nodeData(init_node);
+                // try node stores child node in data.node for simple try
+                init_node = try_data.node;
+                init_tag = ast.nodeTag(init_node);
+            }
+            // Unwrap `catch` wrapper: `allocator.create(T) catch outOfMemory()`
+            if (init_tag == .@"catch") {
+                const catch_data = ast.nodeData(init_node).node_and_node;
+                init_node = catch_data[0];
+                init_tag = ast.nodeTag(init_node);
+            }
+
+            if (init_tag != .call and init_tag != .call_one) continue;
+
+            // Check if the call is allocator.create
+            var buf: [1]std.zig.Ast.Node.Index = undefined;
+            const call_info = switch (init_tag) {
+                .call => ast.callFull(init_node),
+                .call_one => ast.callOne(&buf, init_node),
+                else => continue,
+            };
+            const fn_expr = call_info.ast.fn_expr;
+            const fn_span = ast.nodeToSpan(fn_expr);
+            const fn_text = source[fn_span.start..fn_span.end];
+            const is_create = std.mem.eql(u8, fn_text, "create") or
+                std.mem.endsWith(u8, fn_text, ".create");
+            if (!is_create) continue;
+
+            // Extract variable name from declaration
+            const main_tok = ast.nodeMainToken(node);
+            // var/const token is main_tok, name is typically main_tok + 1
+            const name_tok = main_tok + 1;
+            if (name_tok >= ast.tokens.len) continue;
+            const name = ast.tokenSlice(name_tok);
+            // Store name
+            const duped = try self._allocator.dupe(u8, name);
+            try self.boxed_vars.append(self._allocator, duped);
+        }
+
+        if (self.boxed_vars.items.len == 0) return;
+
+        // Phase 2: Rewrite all identifier usages of boxed vars in body
+        for (0..ast.nodes.len) |i| {
+            const node_idx: std.zig.Ast.Node.Index = @enumFromInt(i);
+            const tag = ast.nodeTag(node_idx);
+            if (tag != .identifier) continue;
+
+            const token_idx = ast.nodeMainToken(node_idx);
+            const ident_span = ast.tokenToSpan(token_idx);
+
+            // Skip identifiers outside the body
+            if (ident_span.start < body_start or ident_span.end > body_end) continue;
+
+            const ident_text = ast.tokenSlice(token_idx);
+
+            // Check if this identifier is a boxed variable
+            var is_boxed = false;
+            for (self.boxed_vars.items) |name| {
+                if (std.mem.eql(u8, ident_text, name)) {
+                    is_boxed = true;
+                    break;
+                }
+            }
+            if (!is_boxed) continue;
+
+            // Skip the declaration site itself (var/const name token)
+            // The declaration site has a different node; identifier usages are
+            // separate nodes. But we need to be safe.
+
+            // Determine context from text after identifier
+            var pos = ident_span.end;
+            while (pos < source.len and std.ascii.isWhitespace(source[pos])) pos += 1;
+
+            if (pos >= source.len) continue;
+
+            const next_char = source[pos];
+
+            // Pattern: ptr.* → ptr.ptr.*
+            if (next_char == '.' and pos + 1 < source.len and source[pos + 1] == '*') {
+                const repl = try std.fmt.allocPrint(self._allocator, "{s}.ptr", .{ident_text});
+                try self.addEdit(ident_span.start, ident_span.end, repl);
+                continue;
+            }
+
+            // Pattern: ptr.field → ptr.ptr.field
+            if (next_char == '.' and pos + 1 < source.len and source[pos + 1] != '*') {
+                const next_dot_pos = pos + 1;
+                // Don't rewrite if it's already ptr.ptr or ptr.deinit
+                if (next_dot_pos + 3 < source.len and
+                    std.mem.eql(u8, source[next_dot_pos..next_dot_pos + 3], "ptr")) {
+                    // Already has .ptr — skip
+                    continue;
+                }
+                const repl = try std.fmt.allocPrint(self._allocator, "{s}.ptr", .{ident_text});
+                try self.addEdit(ident_span.start, ident_span.end, repl);
+                continue;
+            }
+
+            // Pattern: ptr[index] → ptr.ptr[index]
+            if (next_char == '[') {
+                const repl = try std.fmt.allocPrint(self._allocator, "{s}.ptr", .{ident_text});
+                try self.addEdit(ident_span.start, ident_span.end, repl);
+                continue;
+            }
+
+            // Pattern: &ptr → ptr.ptr (address-of of Box)
+            if (next_char == ')' or pos > 0) {
+                // Look backward for `&` immediately before identifier
+                var before = ident_span.start;
+                if (before > 0) before -= 1;
+                while (before > 0 and std.ascii.isWhitespace(source[before])) before -= 1;
+                if (before >= 0 and source[before] == '&') {
+                    // Remove the `&` and keep identifier, then add `.ptr` after ident
+                    // Actually: `&ptr` should become `ptr.ptr` (the Box's inner pointer)
+                    // Remove `&` by editing it out
+                    const amp_start = before;
+                    const amp_end = ident_span.start;
+                    const amp_repl = try std.fmt.allocPrint(self._allocator, "", .{});
+                    try self.addEdit(amp_start, amp_end, amp_repl);
+                    const ptr_repl = try std.fmt.allocPrint(self._allocator, "{s}.ptr", .{ident_text});
+                    try self.addEdit(ident_span.start, ident_span.end, ptr_repl);
+                    continue;
+                }
+            }
+
+            // Pattern: ptr + N or ptr - N → ptr.ptr + N / ptr.ptr - N
+            if (next_char == '+' or next_char == '-') {
+                const repl = try std.fmt.allocPrint(self._allocator, "{s}.ptr", .{ident_text});
+                try self.addEdit(ident_span.start, ident_span.end, repl);
+                continue;
+            }
+        }
+
+        // Phase 3: Rewrite allocator.destroy(boxed_var) → _ = boxed_var.deinit()
+        for (0..ast.nodes.len) |i| {
+            const call_node: std.zig.Ast.Node.Index = @enumFromInt(i);
+            const call_tag = ast.nodeTag(call_node);
+            if (call_tag != .call and call_tag != .call_one) continue;
+
+            var buf: [1]std.zig.Ast.Node.Index = undefined;
+            const call_info = switch (call_tag) {
+                .call => ast.callFull(call_node),
+                .call_one => ast.callOne(&buf, call_node),
+                else => continue,
+            };
+
+            // Must have exactly 1 param
+            if (call_info.ast.params.len != 1) continue;
+
+            const fn_expr = call_info.ast.fn_expr;
+            const fn_span = ast.nodeToSpan(fn_expr);
+            const fn_text = source[fn_span.start..fn_span.end];
+
+            // Check if it's destroy (allocator.destroy, gpa.destroy, etc.)
+            const is_destroy = std.mem.eql(u8, fn_text, "destroy") or
+                std.mem.endsWith(u8, fn_text, ".destroy");
+            if (!is_destroy) continue;
+
+            // Check if param is a boxed variable
+            const param_node = call_info.ast.params[0];
+            if (ast.nodeTag(param_node) != .identifier) continue;
+            const param_tok = ast.nodeMainToken(param_node);
+            const param_name = ast.tokenSlice(param_tok);
+
+            var is_boxed_destroy = false;
+            for (self.boxed_vars.items) |name| {
+                if (std.mem.eql(u8, param_name, name)) {
+                    is_boxed_destroy = true;
+                    break;
+                }
+            }
+            if (!is_boxed_destroy) continue;
+
+            // Check call is inside body
+            const call_span = ast.nodeToSpan(call_node);
+            if (call_span.start < body_start or call_span.end > body_end) continue;
+
+            // Rewrite: allocator.destroy(ptr) → _ = ptr.deinit()
+            const repl = try std.fmt.allocPrint(self._allocator, "_ = {s}.deinit()", .{param_name});
+            try self.addEdit(call_span.start, call_span.end, repl);
+        }
+    }
+
     /// NEW: Rewrite dereferences of Box parameters within function body
     fn rewriteBoxDereferencesInBody(self: *Self, body_node: std.zig.Ast.Node.Index, box_params: []const BoxConversion) !void {
         const ast = &self.ast.?;
