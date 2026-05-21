@@ -1534,7 +1534,8 @@ pub const Transpiler = struct {
                     if (is_boxed_var) break;
                 }
                 if (is_boxed_var) {
-                    const repl = try std.fmt.allocPrint(self._allocator, "defer _ = {s}.deinit()", .{param_name});
+                    const prefix = if (tag == .@"errdefer") "errdefer" else "defer";
+                    const repl = try std.fmt.allocPrint(self._allocator, "{s} _ = {s}.deinit()", .{ prefix, param_name });
                     try self.addEdit(defer_span.start, defer_span.end, repl);
                 }
                 return;
