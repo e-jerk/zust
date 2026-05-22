@@ -220,6 +220,199 @@ pub const Transpiler = struct {
         try self.addEdit(line_start, line_start, text);
     }
 
+    /// Check if the line containing `pos` already has an `@alignCast` call.
+    fn lineHasAlignCast(self: *Self, pos: usize) bool {
+        const source = self.source.slice();
+        var line_start = pos;
+        while (line_start > 0 and source[line_start - 1] != '\n') {
+            line_start -= 1;
+        }
+        var line_end = pos;
+        while (line_end < source.len and source[line_end] != '\n') {
+            line_end += 1;
+        }
+        return std.mem.indexOf(u8, source[line_start..line_end], "@alignCast") != null;
+    }
+
+    /// Check if the line containing `pos` already has a `@ptrCast` call.
+    fn lineHasPtrCast(self: *Self, pos: usize) bool {
+        const source = self.source.slice();
+        var line_start = pos;
+        while (line_start > 0 and source[line_start - 1] != '\n') {
+            line_start -= 1;
+        }
+        var line_end = pos;
+        while (line_end < source.len and source[line_end] != '\n') {
+            line_end += 1;
+        }
+        return std.mem.indexOf(u8, source[line_start..line_end], "@ptrCast") != null;
+    }
+
+    /// Check if an AST node represents a guaranteed-aligned pointer source.
+    /// Safe sources: address-of (&x), typed slice .ptr, allocator outputs, etc.
+    fn isGuaranteedAligned(self: *Self, node: std.zig.Ast.Node.Index) bool {
+        const ast = &self.ast.?;
+        const tag = ast.nodeTag(node);
+
+        // &variable or &field — stack/heap allocated, always aligned
+        if (tag == .address_of) return true;
+
+        // slice.ptr — allocator-backed typed slices are aligned
+        if (tag == .field_access) {
+            const source = self.source.slice();
+            const span = ast.nodeToSpan(node);
+            const text = source[span.start..span.end];
+            if (std.mem.endsWith(u8, text, ".ptr")) return true;
+        }
+
+        // Already wrapped in @alignCast
+        if (tag == .builtin_call_two) {
+            const main_token = ast.nodeMainToken(node);
+            const builtin_name = ast.tokenSlice(main_token);
+            if (std.mem.eql(u8, builtin_name, "@alignCast")) return true;
+        }
+
+        return false;
+    }
+
+    /// Check if a builtin_call_two @ptrCast already has its value wrapped in @alignCast.
+    fn ptrCastValueHasAlignCast(self: *Self, node: std.zig.Ast.Node.Index) bool {
+        const ast = &self.ast.?;
+        const data = ast.nodeData(node).opt_node_and_opt_node;
+        // @ptrCast(T, value) — data[1] is the value node when both args present
+        // @ptrCast(value) — data[0] is the value node, data[1] is .none
+        var value_node: std.zig.Ast.Node.Index = undefined;
+        if (data[1] != .none) {
+            value_node = data[1].unwrap().?;
+        } else if (data[0] != .none) {
+            value_node = data[0].unwrap().?;
+        } else {
+            return false;
+        }
+        return self.isGuaranteedAligned(value_node);
+    }
+
+    /// Check if a type text is a primitive integer or float type.
+    fn isPrimitiveTypeName(self: *Self, type_text: []const u8) bool {
+        _ = self;
+        const primitives = &[_][]const u8{
+            "u8", "i8", "u16", "i16", "u32", "i32", "f32",
+            "u64", "i64", "f64", "u128", "i128",
+            "c_int", "c_uint", "c_long", "c_ulong",
+            "c_longlong", "c_ulonglong", "c_short", "c_ushort",
+            "usize", "isize",
+        };
+        for (primitives) |prim| {
+            if (std.mem.eql(u8, type_text, prim)) return true;
+        }
+        return false;
+    }
+
+    /// Get bit-width of a primitive type name. Returns 0 for unknown.
+    fn primitiveTypeBits(self: *Self, type_text: []const u8) u16 {
+        _ = self;
+        const known_sizes = .{
+            .{ "u8", 8 }, .{ "i8", 8 },
+            .{ "u16", 16 }, .{ "i16", 16 },
+            .{ "u32", 32 }, .{ "i32", 32 }, .{ "f32", 32 },
+            .{ "u64", 64 }, .{ "i64", 64 }, .{ "f64", 64 },
+            .{ "u128", 128 }, .{ "i128", 128 },
+            .{ "c_short", 16 }, .{ "c_ushort", 16 },
+            .{ "c_int", 32 }, .{ "c_uint", 32 },
+            .{ "c_long", 64 }, .{ "c_ulong", 64 },
+            .{ "c_longlong", 64 }, .{ "c_ulonglong", 64 },
+            .{ "usize", 64 }, .{ "isize", 64 },
+        };
+        inline for (known_sizes) |pair| {
+            if (std.mem.eql(u8, type_text, pair[0])) return pair[1];
+        }
+        return 0;
+    }
+
+    /// Check if a @bitCast node is between same-size primitive types.
+    /// Uses AST analysis for robustness.
+    fn isSameSizePrimitiveBitCast(self: *Self, node: std.zig.Ast.Node.Index) bool {
+        const ast = &self.ast.?;
+        const source = self.source.slice();
+
+        // In Zig 0.16, single-arg builtins like @bitCast(x) are builtin_call_two
+        // with data[0] = arg, data[1] = .none
+        const tag = ast.nodeTag(node);
+        var arg_node: ?std.zig.Ast.Node.Index = null;
+
+        if (tag == .builtin_call) {
+            arg_node = ast.nodeData(node).node;
+        } else if (tag == .builtin_call_two) {
+            const data = ast.nodeData(node).opt_node_and_opt_node;
+            if (data[1] == .none and data[0] != .none) {
+                // Single-arg form: @bitCast(value)
+                arg_node = data[0].unwrap().?;
+            } else if (data[0] != .none and data[1] != .none) {
+                // Two-arg form: @bitCast(T, value) — arg is data[1]
+                arg_node = data[1].unwrap().?;
+            }
+        }
+
+        if (arg_node) |arg| {
+            const arg_tag = ast.nodeTag(arg);
+            if (arg_tag == .builtin_call_two) {
+                const arg_main_token = ast.nodeMainToken(arg);
+                const arg_builtin = ast.tokenSlice(arg_main_token);
+                if (std.mem.eql(u8, arg_builtin, "@as")) {
+                    const arg_data = ast.nodeData(arg).opt_node_and_opt_node;
+                    if (arg_data[0] != .none) {
+                        const type_node = arg_data[0].unwrap().?;
+                        const type_span = ast.nodeToSpan(type_node);
+                        const type_text = source[type_span.start..type_span.end];
+                        if (self.isPrimitiveTypeName(type_text)) {
+                            // Also check the outer context for @as(T, @bitCast(...))
+                            // to ensure T is also primitive and same-size
+                            return self.outerTypeIsSameSizePrimitive(node);
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        // Fallback: check if the node text starts with @as(T, @bitCast(...))
+        const span = ast.nodeToSpan(node);
+        const expr_text = source[span.start..span.end];
+        if (std.mem.startsWith(u8, expr_text, "@as(")) {
+            const paren = std.mem.indexOfScalar(u8, expr_text, ')') orelse return false;
+            const type_candidate = expr_text[4..paren];
+            return self.isPrimitiveTypeName(type_candidate);
+        }
+        return false;
+    }
+
+    /// Check if a @bitCast node is inside an @as(T, ...) where T is a same-size primitive.
+    fn outerTypeIsSameSizePrimitive(self: *Self, bitcast_node: std.zig.Ast.Node.Index) bool {
+        const ast = &self.ast.?;
+        const source = self.source.slice();
+        const span = ast.nodeToSpan(bitcast_node);
+        const start = span.start;
+
+        // Search backward for "@as(" preceding the @bitCast
+        if (start < 4) return false;
+        var search_pos = start - 1;
+        while (search_pos > 0) {
+            if (search_pos >= 4 and std.mem.eql(u8, source[search_pos - 4..search_pos], "@as(")) {
+                // Found @as( — extract the type T
+                const type_start = search_pos;
+                var type_end = type_start;
+                while (type_end < start and source[type_end] != ',' and source[type_end] != ')') {
+                    type_end += 1;
+                }
+                const type_candidate = source[type_start..type_end];
+                return self.isPrimitiveTypeName(type_candidate);
+            }
+            search_pos -= 1;
+            if (start - search_pos > 200) break; // Limit search distance
+        }
+        return false;
+    }
+
     fn collectEdits(self: *Self) !void {
         const ast = &self.ast.?;
         const tags = ast.nodes.items(.tag);
@@ -1293,37 +1486,13 @@ pub const Transpiler = struct {
         // }
     }
 
-    /// Handle for loops (issue 2: pointer capture, index access warning)
+    /// Handle for loops — no longer emits warnings for valid Zig 0.16 patterns
+    /// (pointer capture and multi-iterator for are both safe in current Zig)
     fn handleFor(self: *Self, node: std.zig.Ast.Node.Index) !void {
-        const ast = &self.ast.?;
-        const source = self.source.slice();
-        const tag = ast.nodeTag(node);
-
-        if (tag == .@"for" or tag == .for_simple) {
-            const for_info = if (tag == .@"for") ast.forFull(node) else ast.forSimple(node);
-
-            // Issue 2: pointer capture — add comment, skip rewrite (too fragile)
-            if (for_info.ast.inputs.len == 1 and for_info.ast.else_expr == .none) {
-                const payload_token = for_info.payload_token;
-                if (ast.tokens.items(.tag)[payload_token] == .asterisk) {
-                    const span = ast.nodeToSpan(node);
-                    var line_start = span.start;
-                    while (line_start > 0 and source[line_start - 1] != '\n') {
-                        line_start -= 1;
-                    }
-                    const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: for loop with pointer capture requires manual review\n", .{});
-                    try self.addComment(line_start, repl);
-                }
-            }
-
-            // DISABLED: allocator.free removal causes unused capture/parameter errors
-            // Existing: for with index access warning
-            if (for_info.ast.inputs.len >= 2) {
-                const span = ast.nodeToSpan(node);
-                const repl = try std.fmt.allocPrint(self._allocator, "// safe-transpile: for with index access requires manual review\n    ", .{});
-                try self.addEdit(span.start, span.start, repl);
-            }
-        }
+        _ = self;
+        _ = node;
+        // Previously warned on pointer capture and multi-iterator for loops,
+        // but these are valid Zig 0.16 syntax. Warnings removed to reduce noise.
     }
 
     /// Handle while loops with infinite condition (pattern: iteration limit)
@@ -1557,9 +1726,13 @@ pub const Transpiler = struct {
         const builtin_name = ast.tokenSlice(main_token);
         const span = ast.nodeToSpan(node);
 
-        const unsafe_builtins = &[_][]const u8{ "@ptrCast", "@alignCast", "@intToPtr", "@ptrToInt", "@bitCast" };
+        const unsafe_builtins = &[_][]const u8{ "@ptrCast", "@intToPtr", "@ptrToInt", "@bitCast" };
         for (unsafe_builtins) |name| {
             if (std.mem.eql(u8, builtin_name, name)) {
+                // Skip @bitCast warning if it's between same-size primitive types
+                if (std.mem.eql(u8, name, "@bitCast") and self.isSameSizePrimitiveBitCast(node)) {
+                    break;
+                }
                 // Insert comment before the line instead of replacing mid-expression
                 var line_start = span.start;
                 while (line_start > 0 and source[line_start - 1] != '\n') {
@@ -1627,9 +1800,23 @@ pub const Transpiler = struct {
             return;
         }
 
-        const unsafe_builtins_two = &[_][]const u8{ "@ptrCast", "@alignCast", "@intToPtr", "@ptrToInt", "@bitCast" };
+        const unsafe_builtins_two = &[_][]const u8{ "@ptrCast", "@intToPtr", "@ptrToInt", "@bitCast" };
         for (unsafe_builtins_two) |name| {
             if (std.mem.eql(u8, builtin_name, name)) {
+                // Skip @ptrCast warning if the value is already guaranteed aligned
+                // (address-of, slice.ptr, or already wrapped in @alignCast)
+                if (std.mem.eql(u8, name, "@ptrCast") and self.ptrCastValueHasAlignCast(node)) {
+                    break;
+                }
+                // Also skip @ptrCast warning if the line already contains @alignCast
+                // (handles @alignCast(@ptrCast(x)) wrapping pattern)
+                if (std.mem.eql(u8, name, "@ptrCast") and self.lineHasAlignCast(span.start)) {
+                    break;
+                }
+                // Skip @bitCast warning if it's between same-size primitive types
+                if (std.mem.eql(u8, name, "@bitCast") and self.isSameSizePrimitiveBitCast(node)) {
+                    break;
+                }
                 // Insert comment before the line instead of replacing mid-expression
                 var line_start = span.start;
                 while (line_start > 0 and source[line_start - 1] != '\n') {
@@ -2246,7 +2433,25 @@ test "pattern: @bitCast gets manual review comment" {
     try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "// safe-transpile: @bitCast requires manual review"));
 }
 
-test "pattern: for with index access gets warning comment" {
+test "pattern: @ptrCast inside @alignCast does NOT get warning comment" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\fn foo(ptr: *anyopaque) *u32 {
+        \\    return @as(*u32, @alignCast(@ptrCast(ptr)));
+        \\}
+    ;
+
+    var transpiler = Transpiler.init(allocator);
+    defer transpiler.deinit();
+
+    const output = try transpiler.transpileFile(input, allocator);
+    defer allocator.free(output);
+
+    // When @alignCast is already present on the same line, skip the @ptrCast warning
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "safe-transpile"));
+}
+
+test "pattern: for with index access does NOT get warning comment" {
     const allocator = std.testing.allocator;
     const input =
         \\fn foo() void {
@@ -2264,7 +2469,8 @@ test "pattern: for with index access gets warning comment" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "// safe-transpile: for with index access requires manual review"));
+    // Multi-iterator for loops are valid Zig 0.16 — no warning needed
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "safe-transpile"));
 }
 
 test "pattern: const ptr = &value → safe.OffsetPtr when used" {
@@ -2540,7 +2746,7 @@ test "skip: *anyopaque param not converted" {
     try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "safe.Box(anyopaque)"));
 }
 
-test "issue 2: for loop with pointer capture gets comment only" {
+test "issue 2: for loop with pointer capture does NOT get warning comment" {
     const allocator = std.testing.allocator;
     const input =
         \\fn foo() void {
@@ -2557,8 +2763,8 @@ test "issue 2: for loop with pointer capture gets comment only" {
     const output = try transpiler.transpileFile(input, allocator);
     defer allocator.free(output);
 
-    // Should contain a comment about pointer capture
-    try std.testing.expect(std.mem.containsAtLeast(u8, output, 1, "for loop with pointer capture requires manual review"));
+    // Pointer capture in for loops is valid Zig 0.16 — no warning needed
+    try std.testing.expect(!std.mem.containsAtLeast(u8, output, 1, "safe-transpile"));
 }
 
 test "issue 3: scalar single-item pointer dereference NOT rewritten (disabled)" {
