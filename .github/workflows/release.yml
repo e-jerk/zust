@@ -28,9 +28,6 @@ jobs:
           - os: macos-latest
             target: aarch64-macos
             zig_target: aarch64-macos-none
-          - os: macos-13
-            target: x86_64-macos
-            zig_target: x86_64-macos-none
           - os: windows-latest
             target: x86_64-windows
             zig_target: x86_64-windows-gnu
@@ -117,7 +114,6 @@ jobs:
             | Linux x86_64 | `zust-analyze-x86_64-linux` | `zust-transpile-x86_64-linux` |
             | Linux ARM64 | `zust-analyze-aarch64-linux` | `zust-transpile-aarch64-linux` |
             | macOS Apple Silicon | `zust-analyze-aarch64-macos` | `zust-transpile-aarch64-macos` |
-            | macOS Intel | `zust-analyze-x86_64-macos` | `zust-transpile-x86_64-macos` |
             | Windows x86_64 | `zust-analyze-x86_64-windows.exe` | `zust-transpile-x86_64-windows.exe` |
 
             ### SHA-256 Checksums
