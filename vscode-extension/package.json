@@ -2,7 +2,7 @@
   "name": "zust",
   "displayName": "zust",
   "description": "Memory safety analysis for Zig via zust LSP server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "zust",
   "license": "MIT",
   "engines": {

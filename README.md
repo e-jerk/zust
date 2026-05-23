@@ -73,15 +73,17 @@ A standalone tool for general-purpose analysis that dog-foods the library.
 
 ```
 Library types:        52 files (50 types + safe.zig)
-Tests:                462/462 passing
+Tests:                486/486 passing
   - Library tests:   348
   - SIMD tests:      47
   - Fuzz tests:      4
   - Analyzer tests:  63
+  - Transpiler tests: 24
 Analyzer detections:  30 bug classes
+Transpiler patterns:  22 unsafe → safe rewrites
 SIMD speedups:        up to 15x on bulk operations
 Examples:             2 (HTTP server, JSON parser)
-Tools:                2 (transpiler, CLI analyzer)
+Tools:                3 (transpiler, CLI analyzer, call graph)
 LSP features:         6 (diagnostics, completion, go-to-def, hover, code actions, incremental sync)
 CI targets:           5 cross-compile + 3 native
 ```
@@ -1726,7 +1728,7 @@ zig build transpile
 ./zig-out/bin/zust-transpile input.zig output.zig
 ```
 
-**Patterns rewritten:**
+**Patterns rewritten (22 total):**
 | Unsafe Pattern | Safe Replacement |
 |----------------|------------------|
 | `allocator.create(T)` | `safe.Box(T).init(allocator, undefined)` |
@@ -1736,6 +1738,23 @@ zig build transpile
 | `std.Thread.Mutex{}` | `safe.Mutex(void)` |
 | `opt.?` | `if (opt) \|value\| { value } else { return error.NullPointer; }` |
 | `var x: i32;` (uninit) | `var x: i32 = safe.CheckedInt(i32).init(0);` |
+| `*T` parameter | `safe.Box(T)` parameter |
+| `@ptrCast` (guaranteed aligned) | Preserved with alignment analysis |
+| `@bitCast` (same-size primitive) | Preserved with size analysis |
+| `allocator.free(capture)` | Conditional defer destroy or no-op |
+
+**Smart features:**
+- **Call graph analysis** (`tools/call_graph.zig`) — Tracks which functions call `allocator.create` to insert `safe.Box` imports only where needed
+- **Intra-function variable tracking** — Detects when a variable is reassigned from raw pointer to `safe.Box` and skips redundant conversion
+- **Conditional defer destroy** — Converts `allocator.free(x)` inside `if` blocks to `defer if (condition) _ = x.deinit()`
+- **Scoped import skip** — Won't add `const safe = @import("safe");` if the file already has one
+- **AST-based `@ptrCast` analysis** — Detects guaranteed-aligned sources (address-of, field access) to avoid false warnings
+
+**Bulk application:**
+```bash
+# Convert an entire project
+./zig-out/bin/zust-transpile src/ src_safe/
+```
 
 The transpiler is itself written with zust types (`safe.String` for buffers, `safe.ArrayList` for edit tracking) and is analyzed by zust.
 
@@ -1805,7 +1824,7 @@ These cannot be solved at the library level and require changes to Zig itself:
 
 ### Transpiler Limitations
 
-- **20 patterns**: Covers the most common unsafe patterns but not all. Manual review required for: `@ptrCast` with alignment changes, inline assembly, comptime pointer manipulation, and platform-specific intrinsics.
+- **22 patterns**: Covers the most common unsafe patterns but not all. Manual review required for: inline assembly, comptime pointer manipulation, platform-specific intrinsics, and complex `@ptrCast` alignment changes that aren't statically provable.
 - **No type inference**: The transpiler works syntactically. It cannot infer that a `[]u8` is actually a string and should become `safe.String`.
 - **No cross-file refactoring**: Each file is transpiled independently. Cross-file imports are not rewritten.
 
@@ -1863,9 +1882,16 @@ These cannot be solved at the library level and require changes to Zig itself:
 - [x] 70+ analyzer tests
 
 ### Transpiler (`tools/`)
-- [x] 20 unsafe→safe patterns via AST rewriting
+- [x] 22 unsafe→safe patterns via AST rewriting
 - [x] Self-hosted (uses `safe.String`, `safe.ArrayList`)
-- [x] 23 transpiler tests
+- [x] Call graph analysis for targeted import insertion
+- [x] Intra-function variable tracking for safe.Box conversions
+- [x] Conditional defer destroy pattern detection
+- [x] AST-based guaranteed-aligned `@ptrCast` detection
+- [x] Same-size primitive `@bitCast` detection
+- [x] `*T` → `safe.Box(T)` parameter conversion
+- [x] Scoped import skip (won't duplicate `const safe = @import("safe")`)
+- [x] 24 transpiler tests
 
 ### Tooling & Infrastructure
 - [x] Property-based fuzzing (4 fuzzers: Box, String, HashMap, SimdUtils)
